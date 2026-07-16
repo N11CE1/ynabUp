@@ -27,6 +27,20 @@ type Transaction struct {
 		CreatedAt time.Time  `json:"createdAt"`
 		SettledAt *time.Time `json:"settledAt"`
 	} `json:"attributes"`
+	Relationships struct {
+		Account struct {
+			Data struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		} `json:"account"`
+		// TransferAccount is only present when this transaction is an
+		// internal transfer between two of the user's own Up accounts.
+		TransferAccount struct {
+			Data *struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		} `json:"transferAccount"`
+	} `json:"relationships"`
 }
 
 // FetchTransactions retrieves the most recent page of transactions from Up.

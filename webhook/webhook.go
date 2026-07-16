@@ -12,7 +12,6 @@ import (
 
 	"github.com/N11CE1/ynabUp/pipeline"
 	"github.com/N11CE1/ynabUp/up"
-	"github.com/N11CE1/ynabUp/ynab"
 )
 
 type Event struct {
@@ -84,8 +83,7 @@ func Handler(db *sql.DB, cfg pipeline.Config) http.HandlerFunc {
 			return
 		}
 
-		ynabTxn := ynab.Transform(txn, cfg.UpAccountID)
-		skipped, err := pipeline.SyncTransaction(db, ynabTxn, cfg)
+		skipped, err := pipeline.SyncUpTransaction(db, txn, cfg)
 		if err != nil {
 			log.Printf("failed to sync transaction %s: %v", txn.ID, err)
 			http.Error(w, "failed to sync transaction", http.StatusInternalServerError)

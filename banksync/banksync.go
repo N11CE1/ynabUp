@@ -240,7 +240,7 @@ func Handler(db *sql.DB, cfg pipeline.Config) http.HandlerFunc {
 		}
 
 		if event.Type != transactionsDeltaEvent {
-			log.Printf("ignoring banksync event: %s", event.Type)
+			log.Printf("ignoring banksync event: %s (id=%s)", event.Type, event.ID)
 			w.WriteHeader(http.StatusOK)
 			return
 		}

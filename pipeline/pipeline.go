@@ -17,13 +17,22 @@ import (
 type Config struct {
 	UpToken         string
 	UpWebhookSecret string
-	UpAccountID     string
+	// UpAccountMap maps an Up account ID to the YNAB account ID it syncs
+	// into. Having more than one entry is what makes internal transfers
+	// between two of the user's own Up accounts (e.g. Spending <-> Saver)
+	// detectable via Up's transferAccount relationship.
+	UpAccountMap map[string]string
 
 	BankSyncAPIToken      string
 	BankSyncWebhookSecret string
 	// BankSyncAccountMap maps a BankSync accountId to the YNAB account ID
 	// it should sync into, since BankSync may cover multiple bank accounts.
 	BankSyncAccountMap map[string]string
+
+	// YnabTransferPayeeIDs maps a YNAB account ID to that account's
+	// transfer payee ID, needed to post a real linked transfer via
+	// ynab.Transaction.PayeeID rather than a normal PayeeName transaction.
+	YnabTransferPayeeIDs map[string]string
 
 	BudgetID  string
 	YnabToken string
@@ -59,6 +68,60 @@ func SyncTransaction(db *sql.DB, ynabTxn ynab.Transaction, cfg Config) (skipped 
 	return wasDuplicate, nil
 }
 
+// SyncUpTransaction resolves which mapped Up account a transaction belongs
+// to and syncs it to YNAB. If the transaction is an internal transfer (per
+// Up's transferAccount relationship) between two mapped Up accounts, it's
+// posted as a real linked YNAB transfer instead of a normal transaction:
+// only the outflow side is posted (using the destination account's transfer
+// payee), since YNAB creates the inflow side automatically. The inflow side
+// is recorded as handled without being posted, so it isn't reprocessed.
+func SyncUpTransaction(db *sql.DB, txn up.Transaction, cfg Config) (skipped bool, err error) {
+	accountID, ok := cfg.UpAccountMap[txn.Relationships.Account.Data.ID]
+	if !ok {
+		return false, fmt.Errorf("no YNAB account mapped for up account %s", txn.Relationships.Account.Data.ID)
+	}
+
+	transferAccount := txn.Relationships.TransferAccount.Data
+	if transferAccount == nil {
+		return SyncTransaction(db, ynab.Transform(txn, accountID), cfg)
+	}
+
+	destinationAccountID, tracked := cfg.UpAccountMap[transferAccount.ID]
+	if !tracked {
+		// Transfer involves an Up account we're not syncing - there's no
+		// YNAB account to link it to, so treat it as a normal transaction.
+		return SyncTransaction(db, ynab.Transform(txn, accountID), cfg)
+	}
+
+	if txn.Attributes.Amount.ValueInBaseUnits >= 0 {
+		// The inflow side of a transfer between two mapped accounts - YNAB
+		// creates this automatically once the outflow side posts, so just
+		// record it as handled rather than posting it independently.
+		importID := ynab.SafeImportID(txn.ID)
+		alreadySynced, err := store.IsSynced(db, importID)
+		if err != nil {
+			return false, fmt.Errorf("checking sync state: %w", err)
+		}
+		if !alreadySynced {
+			if err := store.MarkSynced(db, importID); err != nil {
+				return false, fmt.Errorf("recording transfer inflow as handled: %w", err)
+			}
+		}
+		return true, nil
+	}
+
+	transferPayeeID, ok := cfg.YnabTransferPayeeIDs[destinationAccountID]
+	if !ok {
+		return false, fmt.Errorf("no transfer_payee_id known for YNAB account %s", destinationAccountID)
+	}
+
+	ynabTxn := ynab.Transform(txn, accountID)
+	ynabTxn.PayeeName = ""
+	ynabTxn.PayeeID = transferPayeeID
+
+	return SyncTransaction(db, ynabTxn, cfg)
+}
+
 // RunOneShotSync fetches the current page of Up transactions and syncs any
 // that haven't already been synced to YNAB.
 func RunOneShotSync(db *sql.DB, cfg Config) {
@@ -74,8 +137,7 @@ func RunOneShotSync(db *sql.DB, cfg Config) {
 	synced, skipped, failed := 0, 0, 0
 
 	for _, txn := range transactions {
-		ynabTxn := ynab.Transform(txn, cfg.UpAccountID)
-		wasSkipped, err := SyncTransaction(db, ynabTxn, cfg)
+		wasSkipped, err := SyncUpTransaction(db, txn, cfg)
 		if err != nil {
 			log.Printf("failed to sync transaction %s: %v", txn.ID, err)
 			failed++

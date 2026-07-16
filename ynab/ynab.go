@@ -39,7 +39,11 @@ type Transaction struct {
 	AccountID string `json:"account_id"`
 	Date      string `json:"date"`
 	Amount    int64  `json:"amount"`
-	PayeeName string `json:"payee_name"`
+	// PayeeID and PayeeName are mutually exclusive: set PayeeID (to a
+	// destination account's TransferPayeeID) to create a real linked
+	// transfer, or PayeeName for a normal transaction.
+	PayeeID   string `json:"payee_id,omitempty"`
+	PayeeName string `json:"payee_name,omitempty"`
 	Cleared   string `json:"cleared"`
 	Approved  bool   `json:"approved"`
 	ImportID  string `json:"import_id"`
@@ -47,6 +51,50 @@ type Transaction struct {
 
 type transactionRequest struct {
 	Transaction Transaction `json:"transaction"`
+}
+
+type Account struct {
+	ID string `json:"id"`
+	// TransferPayeeID is the special payee that, when set as a
+	// transaction's PayeeID, makes YNAB create a real linked transfer
+	// into this account instead of a normal transaction.
+	TransferPayeeID string `json:"transfer_payee_id"`
+}
+
+type accountsResponse struct {
+	Data struct {
+		Accounts []Account `json:"accounts"`
+	} `json:"data"`
+}
+
+// FetchAccounts retrieves every account in the budget, used to look up each
+// account's TransferPayeeID for posting real transfers.
+func FetchAccounts(budgetID, token string) ([]Account, error) {
+	url := fmt.Sprintf("%s/budgets/%s/accounts", APIBaseURL, budgetID)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status: %s: %s", resp.Status, respBody)
+	}
+
+	var result accountsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return result.Data.Accounts, nil
 }
 
 // Transform converts an Up transaction into YNAB's expected shape:

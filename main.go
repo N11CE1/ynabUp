@@ -15,6 +15,7 @@ import (
 	"github.com/N11CE1/ynabUp/pipeline"
 	"github.com/N11CE1/ynabUp/store"
 	"github.com/N11CE1/ynabUp/webhook"
+	"github.com/N11CE1/ynabUp/ynab"
 )
 
 const (
@@ -31,19 +32,37 @@ func runServer(db *sql.DB, cfg pipeline.Config, port string) {
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
-// parseBankSyncAccountMap parses the BANKSYNC_ACCOUNT_MAP env var, a JSON
-// object mapping BankSync account IDs to the YNAB account they sync into.
-func parseBankSyncAccountMap(raw string) map[string]string {
+// parseAccountMap parses a JSON object env var mapping a source account ID
+// to the YNAB account it syncs into (used for both UP_ACCOUNT_MAP and
+// BANKSYNC_ACCOUNT_MAP).
+func parseAccountMap(envVar string) map[string]string {
+	raw := os.Getenv(envVar)
 	if raw == "" {
 		return nil
 	}
 
 	var accountMap map[string]string
 	if err := json.Unmarshal([]byte(raw), &accountMap); err != nil {
-		log.Fatalf("failed to parse BANKSYNC_ACCOUNT_MAP: %v", err)
+		log.Fatalf("failed to parse %s: %v", envVar, err)
 	}
 
 	return accountMap
+}
+
+// fetchYnabTransferPayeeIDs looks up each account's transfer payee ID, used
+// to post real linked transfers between two mapped accounts.
+func fetchYnabTransferPayeeIDs(budgetID, token string) map[string]string {
+	accounts, err := ynab.FetchAccounts(budgetID, token)
+	if err != nil {
+		log.Fatalf("failed to fetch YNAB accounts: %v", err)
+	}
+
+	ids := make(map[string]string, len(accounts))
+	for _, a := range accounts {
+		ids[a.ID] = a.TransferPayeeID
+	}
+
+	return ids
 }
 
 func main() {
@@ -68,15 +87,19 @@ func main() {
 	}
 	defer db.Close()
 
+	budgetID := os.Getenv("YNAB_BUDGET_ID")
+	ynabToken := os.Getenv("YNAB_API_TOKEN")
+
 	cfg := pipeline.Config{
 		UpToken:               os.Getenv("UP_API_TOKEN"),
 		UpWebhookSecret:       os.Getenv("UP_WEBHOOK_SECRET"),
-		UpAccountID:           os.Getenv("YNAB_ACCOUNT_ID"),
+		UpAccountMap:          parseAccountMap("UP_ACCOUNT_MAP"),
 		BankSyncAPIToken:      os.Getenv("BANKSYNC_API_TOKEN"),
 		BankSyncWebhookSecret: os.Getenv("BANKSYNC_WEBHOOK_SECRET"),
-		BankSyncAccountMap:    parseBankSyncAccountMap(os.Getenv("BANKSYNC_ACCOUNT_MAP")),
-		BudgetID:              os.Getenv("YNAB_BUDGET_ID"),
-		YnabToken:             os.Getenv("YNAB_API_TOKEN"),
+		BankSyncAccountMap:    parseAccountMap("BANKSYNC_ACCOUNT_MAP"),
+		YnabTransferPayeeIDs:  fetchYnabTransferPayeeIDs(budgetID, ynabToken),
+		BudgetID:              budgetID,
+		YnabToken:             ynabToken,
 	}
 
 	if *serve {
