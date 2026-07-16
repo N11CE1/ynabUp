@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,11 +12,13 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	_ "modernc.org/sqlite"
 )
 
 const (
 	APIBaseURL     = "https://api.up.com.au/api/v1/transactions"
 	YNABAPIBaseURL = "https://api.ynab.com/v1"
+	DBPath         = "sync.db"
 )
 
 type TransactionResponse struct {
@@ -97,10 +100,48 @@ func transformTransaction(txn Transaction, accountID string) YNABTransaction {
 	}
 }
 
+// initDB opens (creating if needed) the SQLite file tracking which
+// transactions have already been synced to YNAB.
+func initDB(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS synced_transactions (
+			import_id TEXT PRIMARY KEY,
+			synced_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	if err != nil {
+		return nil, err
+	}
+
+	return db, nil
+}
+
+func isSynced(db *sql.DB, importID string) (bool, error) {
+	var exists bool
+	err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM synced_transactions WHERE import_id = ?)`, importID).Scan(&exists)
+	return exists, err
+}
+
+func markSynced(db *sql.DB, importID string) error {
+	_, err := db.Exec(`INSERT INTO synced_transactions (import_id) VALUES (?)`, importID)
+	return err
+}
+
 func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println("no .env file found, falling back to existing environment")
 	}
+
+	db, err := initDB(DBPath)
+	if err != nil {
+		log.Fatalf("failed to open state db: %v", err)
+	}
+	defer db.Close()
 
 	req, err := http.NewRequest("GET", APIBaseURL, nil)
 	if err != nil {
@@ -132,19 +173,37 @@ func main() {
 	budgetID := os.Getenv("YNAB_BUDGET_ID")
 	ynabToken := os.Getenv("YNAB_API_TOKEN")
 
-	ynabTxn := transformTransaction(result.Data[0], accountID)
-	fmt.Printf("Sending to YNAB -> AccountID: %s\tDate: %s\tAmount: %d\tPayeeName: %s\tCleared: %s\tImportID: %s\n",
-		ynabTxn.AccountID,
-		ynabTxn.Date,
-		ynabTxn.Amount,
-		ynabTxn.PayeeName,
-		ynabTxn.Cleared,
-		ynabTxn.ImportID,
-	)
+	synced, skipped, failed := 0, 0, 0
 
-	if err := postTransaction(ynabTxn, budgetID, ynabToken); err != nil {
-		log.Fatalf("failed to post transaction to YNAB: %v", err)
+	for _, txn := range result.Data {
+		alreadySynced, err := isSynced(db, txn.ID)
+		if err != nil {
+			log.Printf("failed to check sync state for %s: %v", txn.ID, err)
+			failed++
+			continue
+		}
+		if alreadySynced {
+			skipped++
+			continue
+		}
+
+		ynabTxn := transformTransaction(txn, accountID)
+		if err := postTransaction(ynabTxn, budgetID, ynabToken); err != nil {
+			log.Printf("failed to post transaction %s to YNAB: %v", txn.ID, err)
+			failed++
+			continue
+		}
+
+		if err := markSynced(db, txn.ID); err != nil {
+			log.Printf("posted %s to YNAB but failed to record sync state: %v", txn.ID, err)
+			failed++
+			continue
+		}
+
+		fmt.Printf("Synced -> Date: %s\tAmount: %d\tPayeeName: %s\tImportID: %s\n",
+			ynabTxn.Date, ynabTxn.Amount, ynabTxn.PayeeName, ynabTxn.ImportID)
+		synced++
 	}
 
-	fmt.Println("Transaction successfully created in YNAB")
+	fmt.Printf("Done: %d synced, %d already synced (skipped), %d failed\n", synced, skipped, failed)
 }
