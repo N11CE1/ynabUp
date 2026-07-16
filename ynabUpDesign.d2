@@ -10,6 +10,7 @@ up: Up Bank {
 }
 
 banksync: BankSync (CommBank via CDR) {
+  api: REST API
   webhook: Webhook destination
 }
 
@@ -22,23 +23,31 @@ vps: Vultr VPS (Melbourne) {
 
   svc: upsync (Go, Docker) {
     up_handler: "Up webhook handler" {
-      tooltip: Verifies X-Up-Authenticity-Signature (HMAC-SHA256)
+      tooltip: Verifies X-Up-Authenticity-Signature (HMAC-SHA256), fetches the single referenced txn by ID
     }
-    bs_handler: BankSync webhook handler
-    poller: Poller / reconciler
+    bs_handler: BankSync webhook handler {
+      tooltip: Verifies Standard Webhooks signature (HMAC-SHA256, 5-min replay window)
+    }
+    poller: Up one-shot sync {
+      tooltip: Fetches the current page of Up transactions
+    }
+    backfill: BankSync backfill {
+      tooltip: Pulls a given date range directly via BankSync's REST API - no webhook involved
+    }
     transformer: Transformer {
-      tooltip: base units (cents) -> milliunits, payee + date mapping
+      tooltip: base units/dollars -> milliunits, payee + date mapping
     }
     ynab_client: YNAB client {
-      tooltip: import_id = source txn ID (idempotent)
+      tooltip: import_id = source txn ID (hashed if over 36 chars), idempotent, retries on rate limit
     }
     db: SQLite state {
       shape: cylinder
     }
 
-    up_handler -> poller: txn ID only ->\nreuse fetch pipeline
+    up_handler -> transformer
     bs_handler -> transformer
     poller -> transformer
+    backfill -> transformer
     transformer -> ynab_client
     ynab_client -> db: record synced IDs
     ynab_client <- db: skip already-synced
@@ -61,4 +70,5 @@ banksync.webhook -> vps.nginx: CommBank txns (POST)
 
 # Data path (pull + write)
 vps.svc.poller -> up.api: GET /transactions\n(full details)
+vps.svc.backfill -> banksync.api: "GET /transactions?from&to"
 vps.svc.ynab_client -> ynab.api: "POST /budgets/{id}/transactions"
