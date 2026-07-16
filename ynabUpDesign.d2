@@ -61,4 +61,4 @@ banksync.webhook -> vps.nginx: CommBank txns (POST)
 
 # Data path (pull + write)
 vps.svc.poller -> up.api: GET /transactions\n(full details)
-vps.svc.ynab_client -> ynab.api: POST /budgets/{id}/transactions
+vps.svc.ynab_client -> ynab.api: "POST /budgets/{id}/transactions"
