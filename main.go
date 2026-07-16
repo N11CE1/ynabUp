@@ -18,7 +18,7 @@ import (
 const (
 	APIBaseURL     = "https://api.up.com.au/api/v1/transactions"
 	YNABAPIBaseURL = "https://api.ynab.com/v1"
-	DBPath         = "sync.db"
+	DefaultDBPath  = "sync.db"
 )
 
 type TransactionResponse struct {
@@ -137,7 +137,12 @@ func main() {
 		log.Println("no .env file found, falling back to existing environment")
 	}
 
-	db, err := initDB(DBPath)
+	dbPath := os.Getenv("DB_PATH")
+	if dbPath == "" {
+		dbPath = DefaultDBPath
+	}
+
+	db, err := initDB(dbPath)
 	if err != nil {
 		log.Fatalf("failed to open state db: %v", err)
 	}
