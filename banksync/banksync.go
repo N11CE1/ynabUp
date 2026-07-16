@@ -19,7 +19,18 @@ import (
 	"github.com/N11CE1/ynabUp.git/ynab"
 )
 
-const transactionsDeltaEvent = "transactions.delta"
+const (
+	transactionsDeltaEvent = "transactions.delta"
+	APIBaseURL             = "https://api.banksync.io/v1"
+)
+
+type transactionsResponse struct {
+	Data []Transaction `json:"data"`
+	Meta struct {
+		Cursor  *string `json:"cursor"`
+		HasMore bool    `json:"hasMore"`
+	} `json:"meta"`
+}
 
 type Event struct {
 	ID          string        `json:"id"`
@@ -65,8 +76,90 @@ func Transform(txn Transaction, accountID string) ynab.Transaction {
 		PayeeName: payee,
 		Cleared:   cleared,
 		Approved:  false,
-		ImportID:  txn.ID,
+		ImportID:  ynab.SafeImportID(txn.ID),
 	}
+}
+
+// FetchTransactions retrieves all transactions for one BankSync account
+// within [from, to] (YYYY-MM-DD), following the cursor until exhausted.
+func FetchTransactions(bankID, accountID, token, from, to string) ([]Transaction, error) {
+	var all []Transaction
+	cursor := ""
+
+	for {
+		url := fmt.Sprintf("%s/banks/%s/accounts/%s/transactions?from=%s&to=%s", APIBaseURL, bankID, accountID, from, to)
+		if cursor != "" {
+			url += "&cursor=" + cursor
+		}
+
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("X-API-Key", token)
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			respBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("unexpected status: %s: %s", resp.Status, respBody)
+		}
+
+		var result transactionsResponse
+		err = json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+
+		all = append(all, result.Data...)
+
+		if !result.Meta.HasMore || result.Meta.Cursor == nil {
+			break
+		}
+		cursor = *result.Meta.Cursor
+	}
+
+	return all, nil
+}
+
+// RunBackfill fetches transactions for every mapped BankSync account within
+// [from, to] (YYYY-MM-DD) and syncs any that haven't already been synced to
+// YNAB. Safe to re-run: already-synced transactions are skipped.
+func RunBackfill(db *sql.DB, cfg pipeline.Config, bankID, from, to string) {
+	synced, skipped, failed := 0, 0, 0
+
+	for bankSyncAccountID, ynabAccountID := range cfg.BankSyncAccountMap {
+		transactions, err := FetchTransactions(bankID, bankSyncAccountID, cfg.BankSyncAPIToken, from, to)
+		if err != nil {
+			log.Printf("failed to fetch transactions for account %s: %v", bankSyncAccountID, err)
+			continue
+		}
+
+		for _, txn := range transactions {
+			ynabTxn := Transform(txn, ynabAccountID)
+			wasSkipped, err := pipeline.SyncTransaction(db, ynabTxn, cfg)
+			if err != nil {
+				log.Printf("failed to sync transaction %s: %v", txn.ID, err)
+				failed++
+				continue
+			}
+			if wasSkipped {
+				skipped++
+				continue
+			}
+
+			fmt.Printf("Synced -> ImportID: %s\n", txn.ID)
+			synced++
+		}
+	}
+
+	fmt.Printf("Backfill done: %d synced, %d already synced (skipped), %d failed\n", synced, skipped, failed)
 }
 
 // VerifySignature checks BankSync's Standard Webhooks signature: HMAC-SHA256

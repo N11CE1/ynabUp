@@ -2,14 +2,32 @@ package ynab
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/N11CE1/ynabUp.git/up"
 )
+
+const maxImportIDLength = 36
+
+// SafeImportID returns id unchanged if it fits YNAB's 36-character
+// import_id limit; otherwise it returns a deterministic, truncated
+// SHA-256 hash of id, so a given source transaction always maps to the
+// same import_id across runs.
+func SafeImportID(id string) string {
+	if len(id) <= maxImportIDLength {
+		return id
+	}
+
+	sum := sha256.Sum256([]byte(id))
+	return hex.EncodeToString(sum[:])[:maxImportIDLength]
+}
 
 const APIBaseURL = "https://api.ynab.com/v1"
 
@@ -46,11 +64,17 @@ func Transform(txn up.Transaction, accountID string) Transaction {
 		PayeeName: txn.Attributes.Description,
 		Cleared:   cleared,
 		Approved:  false,
-		ImportID:  txn.ID,
+		ImportID:  SafeImportID(txn.ID),
 	}
 }
 
-// PostTransaction sends a single transformed transaction to YNAB's API.
+const maxRateLimitRetries = 5
+
+// PostTransaction sends a single transformed transaction to YNAB's API,
+// retrying with exponential backoff if rate-limited. YNAB doesn't send a
+// Retry-After header, so this only smooths over short bursts - if the
+// hourly quota is genuinely exhausted, it gives up and returns an error;
+// callers can safely retry later since posting is idempotent on import_id.
 func PostTransaction(txn Transaction, budgetID, token string) error {
 	body, err := json.Marshal(transactionRequest{Transaction: txn})
 	if err != nil {
@@ -58,28 +82,46 @@ func PostTransaction(txn Transaction, budgetID, token string) error {
 	}
 
 	url := fmt.Sprintf("%s/budgets/%s/transactions", APIBaseURL, budgetID)
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
+	backoff := 2 * time.Second
+	for attempt := 1; attempt <= maxRateLimitRetries; attempt++ {
+		req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
 
-	if resp.StatusCode == http.StatusConflict {
-		return ErrDuplicateTransaction
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			resp.Body.Close()
+			if attempt == maxRateLimitRetries {
+				return fmt.Errorf("rate limited after %d attempts", maxRateLimitRetries)
+			}
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+
+		if resp.StatusCode == http.StatusConflict {
+			resp.Body.Close()
+			return ErrDuplicateTransaction
+		}
+
+		if resp.StatusCode != http.StatusCreated {
+			respBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return fmt.Errorf("unexpected status: %s: %s", resp.Status, respBody)
+		}
+
+		resp.Body.Close()
+		return nil
 	}
 
-	if resp.StatusCode != http.StatusCreated {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("unexpected status: %s: %s", resp.Status, respBody)
-	}
-
-	return nil
+	return fmt.Errorf("rate limited after %d attempts", maxRateLimitRetries)
 }

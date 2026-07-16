@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/joho/godotenv"
 
@@ -47,6 +48,9 @@ func parseBankSyncAccountMap(raw string) map[string]string {
 
 func main() {
 	serve := flag.Bool("serve", false, "run as a webhook server instead of a one-shot sync")
+	backfill := flag.Bool("backfill", false, "backfill BankSync transactions for a date range instead of a one-shot sync")
+	from := flag.String("from", "", "backfill start date (YYYY-MM-DD), defaults to the 1st of the current month")
+	to := flag.String("to", "", "backfill end date (YYYY-MM-DD), defaults to today")
 	flag.Parse()
 
 	if err := godotenv.Load(); err != nil {
@@ -68,6 +72,7 @@ func main() {
 		UpToken:               os.Getenv("UP_API_TOKEN"),
 		UpWebhookSecret:       os.Getenv("UP_WEBHOOK_SECRET"),
 		UpAccountID:           os.Getenv("YNAB_ACCOUNT_ID"),
+		BankSyncAPIToken:      os.Getenv("BANKSYNC_API_TOKEN"),
 		BankSyncWebhookSecret: os.Getenv("BANKSYNC_WEBHOOK_SECRET"),
 		BankSyncAccountMap:    parseBankSyncAccountMap(os.Getenv("BANKSYNC_ACCOUNT_MAP")),
 		BudgetID:              os.Getenv("YNAB_BUDGET_ID"),
@@ -80,6 +85,26 @@ func main() {
 			port = DefaultPort
 		}
 		runServer(db, cfg, port)
+		return
+	}
+
+	if *backfill {
+		now := time.Now()
+		fromDate := *from
+		if fromDate == "" {
+			fromDate = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location()).Format("2006-01-02")
+		}
+		toDate := *to
+		if toDate == "" {
+			toDate = now.Format("2006-01-02")
+		}
+
+		bankID := os.Getenv("BANKSYNC_BANK_ID")
+		if bankID == "" {
+			log.Fatal("BANKSYNC_BANK_ID must be set to backfill")
+		}
+
+		banksync.RunBackfill(db, cfg, bankID, fromDate, toDate)
 		return
 	}
 

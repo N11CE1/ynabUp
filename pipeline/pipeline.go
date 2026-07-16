@@ -19,6 +19,7 @@ type Config struct {
 	UpWebhookSecret string
 	UpAccountID     string
 
+	BankSyncAPIToken      string
 	BankSyncWebhookSecret string
 	// BankSyncAccountMap maps a BankSync accountId to the YNAB account ID
 	// it should sync into, since BankSync may cover multiple bank accounts.
