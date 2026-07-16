@@ -1,0 +1,64 @@
+direction: right
+
+title: |md
+  # upsync — Up Bank → YNAB sync
+| {near: top-center}
+
+up: Up Bank {
+  api: REST API
+  webhooks: Webhook sender
+}
+
+banksync: BankSync (CommBank via CDR) {
+  webhook: Webhook destination
+}
+
+ynab: YNAB {
+  api: REST API
+}
+
+vps: Vultr VPS (Melbourne) {
+  nginx: Nginx reverse proxy
+
+  svc: upsync (Go, Docker) {
+    up_handler: "Up webhook handler" {
+      tooltip: Verifies X-Up-Authenticity-Signature (HMAC-SHA256)
+    }
+    bs_handler: BankSync webhook handler
+    poller: Poller / reconciler
+    transformer: Transformer {
+      tooltip: base units (cents) -> milliunits, payee + date mapping
+    }
+    ynab_client: YNAB client {
+      tooltip: import_id = source txn ID (idempotent)
+    }
+    db: SQLite state {
+      shape: cylinder
+    }
+
+    up_handler -> poller: txn ID only ->\nreuse fetch pipeline
+    bs_handler -> transformer
+    poller -> transformer
+    transformer -> ynab_client
+    ynab_client -> db: record synced IDs
+    ynab_client <- db: skip already-synced
+  }
+
+  cron: Cron (nightly) {
+    shape: hexagon
+  }
+
+  nginx -> svc.up_handler: "/webhooks/up"
+  nginx -> svc.bs_handler: "/webhooks/banksync"
+  cron -> svc.poller: reconcile safety net
+}
+
+# Fast path (push)
+up.webhooks -> vps.nginx: TRANSACTION_SETTLED\n(signed POST) {
+  style.stroke-dash: 0
+}
+banksync.webhook -> vps.nginx: CommBank txns (POST)
+
+# Data path (pull + write)
+vps.svc.poller -> up.api: GET /transactions\n(full details)
+vps.svc.ynab_client -> ynab.api: POST /budgets/{id}/transactions
