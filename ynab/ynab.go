@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/N11CE1/ynabUp.git/up"
+	"github.com/N11CE1/ynabUp/up"
 )
 
 const maxImportIDLength = 36

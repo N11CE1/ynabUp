@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/N11CE1/ynabUp.git/pipeline"
-	"github.com/N11CE1/ynabUp.git/ynab"
+	"github.com/N11CE1/ynabUp/pipeline"
+	"github.com/N11CE1/ynabUp/ynab"
 )
 
 const (

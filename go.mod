@@ -1,4 +1,4 @@
-module github.com/N11CE1/ynabUp.git
+module github.com/N11CE1/ynabUp
 
 go 1.26.4
 

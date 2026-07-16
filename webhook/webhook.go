@@ -10,9 +10,9 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/N11CE1/ynabUp.git/pipeline"
-	"github.com/N11CE1/ynabUp.git/up"
-	"github.com/N11CE1/ynabUp.git/ynab"
+	"github.com/N11CE1/ynabUp/pipeline"
+	"github.com/N11CE1/ynabUp/up"
+	"github.com/N11CE1/ynabUp/ynab"
 )
 
 type Event struct {

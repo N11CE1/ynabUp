@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/N11CE1/ynabUp.git/store"
-	"github.com/N11CE1/ynabUp.git/up"
-	"github.com/N11CE1/ynabUp.git/ynab"
+	"github.com/N11CE1/ynabUp/store"
+	"github.com/N11CE1/ynabUp/up"
+	"github.com/N11CE1/ynabUp/ynab"
 )
 
 // Config bundles the credentials and IDs shared across sync entry points

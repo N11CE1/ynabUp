@@ -11,10 +11,10 @@ import (
 
 	"github.com/joho/godotenv"
 
-	"github.com/N11CE1/ynabUp.git/banksync"
-	"github.com/N11CE1/ynabUp.git/pipeline"
-	"github.com/N11CE1/ynabUp.git/store"
-	"github.com/N11CE1/ynabUp.git/webhook"
+	"github.com/N11CE1/ynabUp/banksync"
+	"github.com/N11CE1/ynabUp/pipeline"
+	"github.com/N11CE1/ynabUp/store"
+	"github.com/N11CE1/ynabUp/webhook"
 )
 
 const (
