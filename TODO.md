@@ -37,7 +37,3 @@ Deferred ideas and known gaps, not urgent yet but worth remembering.
   transaction per real account (Up + 4 CommBank accounts), dated the day
   before the backfill window starts, for whatever amount makes the YNAB
   running balance match the real bank balance at that point.
-
-## Housekeeping
-- `go.mod` module path has a stray trailing `.git`
-  (`github.com/N11CE1/ynabUp.git`) — fix to `github.com/N11CE1/ynabUp`.
