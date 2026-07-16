@@ -32,6 +32,21 @@ Deferred ideas and known gaps, not urgent yet but worth remembering.
   window) and needs renewing in the BankSync app before then, or the
   connection lapses.
 
+## Cross-account transfers
+- Currently a transfer between two of our own tracked accounts (e.g.
+  CommBank -> Up) posts as two separate, unlinked transactions instead of a
+  proper YNAB transfer, which can distort category/available-to-budget math
+  if either side gets categorized. To fix:
+  - Match an Up transaction against a BankSync transaction: opposite sign,
+    same/close amount, within some time window, between two mapped accounts.
+  - On a match, post one side using YNAB's reserved "Transfer: [Account]"
+    payee (via `payee_id`, from `GET /budgets/{id}/payees`) so YNAB
+    auto-creates the paired transaction, and suppress posting the other
+    side independently.
+  - Handle the asynchronous-arrival case (one side's webhook/backfill
+    landing well before the other) and already-posted-before-matched
+    transactions (needs a follow-up PATCH/DELETE).
+
 ## Migrating to the real budget
 - Before going live: create one manual "opening balance" reconciliation
   transaction per real account (Up + 4 CommBank accounts), dated the day
