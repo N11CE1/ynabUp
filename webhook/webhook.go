@@ -12,6 +12,7 @@ import (
 
 	"github.com/N11CE1/ynabUp.git/pipeline"
 	"github.com/N11CE1/ynabUp.git/up"
+	"github.com/N11CE1/ynabUp.git/ynab"
 )
 
 type Event struct {
@@ -56,7 +57,7 @@ func Handler(db *sql.DB, cfg pipeline.Config) http.HandlerFunc {
 			return
 		}
 
-		if !VerifySignature(body, r.Header.Get("X-Up-Authenticity-Signature"), cfg.WebhookSecret) {
+		if !VerifySignature(body, r.Header.Get("X-Up-Authenticity-Signature"), cfg.UpWebhookSecret) {
 			http.Error(w, "invalid signature", http.StatusUnauthorized)
 			return
 		}
@@ -83,7 +84,8 @@ func Handler(db *sql.DB, cfg pipeline.Config) http.HandlerFunc {
 			return
 		}
 
-		skipped, err := pipeline.SyncTransaction(db, txn, cfg)
+		ynabTxn := ynab.Transform(txn, cfg.UpAccountID)
+		skipped, err := pipeline.SyncTransaction(db, ynabTxn, cfg)
 		if err != nil {
 			log.Printf("failed to sync transaction %s: %v", txn.ID, err)
 			http.Error(w, "failed to sync transaction", http.StatusInternalServerError)

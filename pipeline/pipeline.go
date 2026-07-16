@@ -11,22 +11,29 @@ import (
 	"github.com/N11CE1/ynabUp.git/ynab"
 )
 
-// Config bundles the credentials and IDs shared by both the one-shot sync
-// and the webhook server, so they don't need to be threaded individually
-// through every function.
+// Config bundles the credentials and IDs shared across sync entry points
+// (one-shot sync, Up webhook, BankSync webhook), so they don't need to be
+// threaded individually through every function.
 type Config struct {
-	UpToken       string
-	WebhookSecret string
-	AccountID     string
-	BudgetID      string
-	YnabToken     string
+	UpToken         string
+	UpWebhookSecret string
+	UpAccountID     string
+
+	BankSyncWebhookSecret string
+	// BankSyncAccountMap maps a BankSync accountId to the YNAB account ID
+	// it should sync into, since BankSync may cover multiple bank accounts.
+	BankSyncAccountMap map[string]string
+
+	BudgetID  string
+	YnabToken string
 }
 
 // SyncTransaction checks whether a transaction has already been synced, and
-// if not, transforms and posts it to YNAB and records it as synced. It's
-// shared by both the one-shot batch sync and the webhook handler.
-func SyncTransaction(db *sql.DB, txn up.Transaction, cfg Config) (skipped bool, err error) {
-	alreadySynced, err := store.IsSynced(db, txn.ID)
+// if not, posts it to YNAB and records it as synced. Callers transform their
+// source-specific transaction into ynab.Transaction first, so this is shared
+// by the one-shot batch sync, the Up webhook, and the BankSync webhook.
+func SyncTransaction(db *sql.DB, ynabTxn ynab.Transaction, cfg Config) (skipped bool, err error) {
+	alreadySynced, err := store.IsSynced(db, ynabTxn.ImportID)
 	if err != nil {
 		return false, fmt.Errorf("checking sync state: %w", err)
 	}
@@ -35,7 +42,6 @@ func SyncTransaction(db *sql.DB, txn up.Transaction, cfg Config) (skipped bool, 
 	}
 
 	wasDuplicate := false
-	ynabTxn := ynab.Transform(txn, cfg.AccountID)
 	if err := ynab.PostTransaction(ynabTxn, cfg.BudgetID, cfg.YnabToken); err != nil {
 		if !errors.Is(err, ynab.ErrDuplicateTransaction) {
 			return false, fmt.Errorf("posting to YNAB: %w", err)
@@ -45,7 +51,7 @@ func SyncTransaction(db *sql.DB, txn up.Transaction, cfg Config) (skipped bool, 
 		wasDuplicate = true
 	}
 
-	if err := store.MarkSynced(db, txn.ID); err != nil {
+	if err := store.MarkSynced(db, ynabTxn.ImportID); err != nil {
 		return false, fmt.Errorf("posted to YNAB but failed to record sync state: %w", err)
 	}
 
@@ -67,7 +73,8 @@ func RunOneShotSync(db *sql.DB, cfg Config) {
 	synced, skipped, failed := 0, 0, 0
 
 	for _, txn := range transactions {
-		wasSkipped, err := SyncTransaction(db, txn, cfg)
+		ynabTxn := ynab.Transform(txn, cfg.UpAccountID)
+		wasSkipped, err := SyncTransaction(db, ynabTxn, cfg)
 		if err != nil {
 			log.Printf("failed to sync transaction %s: %v", txn.ID, err)
 			failed++
