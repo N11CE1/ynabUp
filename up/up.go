@@ -4,13 +4,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 )
 
 const APIBaseURL = "https://api.up.com.au/api/v1/transactions"
 
 type TransactionResponse struct {
-	Data []Transaction `json:"data"`
+	Data  []Transaction `json:"data"`
+	Links struct {
+		Next *string `json:"next"`
+	} `json:"links"`
 }
 
 type SingleTransactionResponse struct {
@@ -43,31 +47,54 @@ type Transaction struct {
 	} `json:"relationships"`
 }
 
-// FetchTransactions retrieves the most recent page of transactions from Up.
-func FetchTransactions(token string) ([]Transaction, error) {
-	req, err := http.NewRequest("GET", APIBaseURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status: %s", resp.Status)
+// FetchTransactions retrieves transactions from Up, following pagination
+// until exhausted. If since is non-nil, only transactions created at or
+// after it are returned (via Up's filter[since]), instead of pulling full
+// history every call.
+func FetchTransactions(token string, since *time.Time) ([]Transaction, error) {
+	reqURL := APIBaseURL
+	if since != nil {
+		v := url.Values{}
+		v.Set("filter[since]", since.Format(time.RFC3339))
+		reqURL = APIBaseURL + "?" + v.Encode()
 	}
 
-	var result TransactionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
+	var all []Transaction
+	for reqURL != "" {
+		req, err := http.NewRequest("GET", reqURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("unexpected status: %s", resp.Status)
+		}
+
+		var result TransactionResponse
+		err = json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+
+		all = append(all, result.Data...)
+
+		if result.Links.Next == nil {
+			reqURL = ""
+		} else {
+			reqURL = *result.Links.Next
+		}
 	}
 
-	return result.Data, nil
+	return all, nil
 }
 
 // FetchTransactionByID retrieves a single transaction, used by the webhook

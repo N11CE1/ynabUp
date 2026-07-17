@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/N11CE1/ynabUp/store"
 	"github.com/N11CE1/ynabUp/up"
@@ -122,16 +123,33 @@ func SyncUpTransaction(db *sql.DB, txn up.Transaction, cfg Config) (skipped bool
 	return SyncTransaction(db, ynabTxn, cfg)
 }
 
-// RunOneShotSync fetches the current page of Up transactions and syncs any
-// that haven't already been synced to YNAB.
+const upWatermarkKey = "up_last_synced_at"
+
+// RunOneShotSync fetches Up transactions since the last successful run (or
+// full history on the very first run) and syncs any that haven't already
+// been synced to YNAB. The watermark only advances when nothing fails, so a
+// partial failure gets retried from the same starting point next run rather
+// than being skipped over.
 func RunOneShotSync(db *sql.DB, cfg Config) {
-	transactions, err := up.FetchTransactions(cfg.UpToken)
+	watermark, hasWatermark, err := store.GetSetting(db, upWatermarkKey)
 	if err != nil {
-		log.Fatalf("failed to fetch transactions: %v", err)
+		log.Fatalf("failed to read sync watermark: %v", err)
 	}
 
-	if len(transactions) == 0 {
-		log.Fatal("no transactions returned from Up")
+	var since *time.Time
+	if hasWatermark {
+		t, err := time.Parse(time.RFC3339, watermark)
+		if err != nil {
+			log.Fatalf("failed to parse stored watermark %q: %v", watermark, err)
+		}
+		since = &t
+	}
+
+	runStartedAt := time.Now()
+
+	transactions, err := up.FetchTransactions(cfg.UpToken, since)
+	if err != nil {
+		log.Fatalf("failed to fetch transactions: %v", err)
 	}
 
 	synced, skipped, failed := 0, 0, 0
@@ -150,6 +168,12 @@ func RunOneShotSync(db *sql.DB, cfg Config) {
 
 		fmt.Printf("Synced -> ImportID: %s\n", txn.ID)
 		synced++
+	}
+
+	if failed == 0 {
+		if err := store.SetSetting(db, upWatermarkKey, runStartedAt.Format(time.RFC3339)); err != nil {
+			log.Printf("failed to update sync watermark: %v", err)
+		}
 	}
 
 	fmt.Printf("Done: %d synced, %d already synced (skipped), %d failed\n", synced, skipped, failed)
