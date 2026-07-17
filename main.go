@@ -19,17 +19,57 @@ import (
 )
 
 const (
-	DefaultDBPath = "sync.db"
-	DefaultPort   = "8080"
+	DefaultDBPath       = "sync.db"
+	DefaultPort         = "8080"
+	DefaultCronInterval = time.Hour
+	// bankSyncCronLookback bounds each cron pass's BankSync backfill to a
+	// short rolling window, rather than rescanning the whole month every
+	// time - generous enough to catch anything that arrived late.
+	bankSyncCronLookback = 3 * 24 * time.Hour
 )
 
-// runServer starts the HTTP server that receives Up's and BankSync's webhooks.
-func runServer(db *sql.DB, cfg pipeline.Config, port string) {
+// runServer starts the HTTP server that receives Up's and BankSync's
+// webhooks, and kicks off a background reconciliation loop alongside it -
+// a safety net for Up (in case a webhook was missed) and, since BankSync's
+// own webhook delivery is currently broken on their end, the only way
+// BankSync data gets synced at all.
+func runServer(db *sql.DB, cfg pipeline.Config, port, bankID string, cronInterval time.Duration) {
 	http.HandleFunc("/webhooks/up", webhook.Handler(db, cfg))
 	http.HandleFunc("/webhooks/banksync", banksync.Handler(db, cfg))
 
+	go runCronLoop(db, cfg, bankID, cronInterval)
+
 	log.Printf("listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
+}
+
+// runCronLoop runs a reconciliation pass immediately, then every interval
+// thereafter, for as long as the process is running.
+func runCronLoop(db *sql.DB, cfg pipeline.Config, bankID string, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		runReconciliation(db, cfg, bankID)
+		<-ticker.C
+	}
+}
+
+func runReconciliation(db *sql.DB, cfg pipeline.Config, bankID string) {
+	log.Println("cron: running Up reconciliation sync")
+	if err := pipeline.RunOneShotSync(db, cfg); err != nil {
+		log.Printf("cron: Up reconciliation failed: %v", err)
+	}
+
+	if bankID == "" || len(cfg.BankSyncAccountMap) == 0 {
+		return
+	}
+
+	log.Println("cron: running BankSync backfill")
+	now := time.Now()
+	from := now.Add(-bankSyncCronLookback).Format("2006-01-02")
+	to := now.Format("2006-01-02")
+	banksync.RunBackfill(db, cfg, bankID, from, to)
 }
 
 // parseAccountMap parses a JSON object env var mapping a source account ID
@@ -102,12 +142,24 @@ func main() {
 		YnabToken:             ynabToken,
 	}
 
+	bankID := os.Getenv("BANKSYNC_BANK_ID")
+
 	if *serve {
 		port := os.Getenv("PORT")
 		if port == "" {
 			port = DefaultPort
 		}
-		runServer(db, cfg, port)
+
+		cronInterval := DefaultCronInterval
+		if raw := os.Getenv("CRON_INTERVAL"); raw != "" {
+			d, err := time.ParseDuration(raw)
+			if err != nil {
+				log.Fatalf("failed to parse CRON_INTERVAL %q: %v", raw, err)
+			}
+			cronInterval = d
+		}
+
+		runServer(db, cfg, port, bankID, cronInterval)
 		return
 	}
 
@@ -122,7 +174,6 @@ func main() {
 			toDate = now.Format("2006-01-02")
 		}
 
-		bankID := os.Getenv("BANKSYNC_BANK_ID")
 		if bankID == "" {
 			log.Fatal("BANKSYNC_BANK_ID must be set to backfill")
 		}
@@ -131,5 +182,7 @@ func main() {
 		return
 	}
 
-	pipeline.RunOneShotSync(db, cfg)
+	if err := pipeline.RunOneShotSync(db, cfg); err != nil {
+		log.Fatalf("one-shot sync failed: %v", err)
+	}
 }

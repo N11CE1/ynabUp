@@ -129,18 +129,19 @@ const upWatermarkKey = "up_last_synced_at"
 // full history on the very first run) and syncs any that haven't already
 // been synced to YNAB. The watermark only advances when nothing fails, so a
 // partial failure gets retried from the same starting point next run rather
-// than being skipped over.
-func RunOneShotSync(db *sql.DB, cfg Config) {
+// than being skipped over. Returns an error instead of exiting the process,
+// since this also runs from a long-running background loop in -serve mode.
+func RunOneShotSync(db *sql.DB, cfg Config) error {
 	watermark, hasWatermark, err := store.GetSetting(db, upWatermarkKey)
 	if err != nil {
-		log.Fatalf("failed to read sync watermark: %v", err)
+		return fmt.Errorf("failed to read sync watermark: %w", err)
 	}
 
 	var since *time.Time
 	if hasWatermark {
 		t, err := time.Parse(time.RFC3339, watermark)
 		if err != nil {
-			log.Fatalf("failed to parse stored watermark %q: %v", watermark, err)
+			return fmt.Errorf("failed to parse stored watermark %q: %w", watermark, err)
 		}
 		since = &t
 	}
@@ -149,7 +150,7 @@ func RunOneShotSync(db *sql.DB, cfg Config) {
 
 	transactions, err := up.FetchTransactions(cfg.UpToken, since)
 	if err != nil {
-		log.Fatalf("failed to fetch transactions: %v", err)
+		return fmt.Errorf("failed to fetch transactions: %w", err)
 	}
 
 	synced, skipped, failed := 0, 0, 0
@@ -177,4 +178,5 @@ func RunOneShotSync(db *sql.DB, cfg Config) {
 	}
 
 	fmt.Printf("Done: %d synced, %d already synced (skipped), %d failed\n", synced, skipped, failed)
+	return nil
 }
