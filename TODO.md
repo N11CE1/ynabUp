@@ -17,7 +17,15 @@ Deferred ideas and known gaps, not urgent yet but worth remembering.
   optional pre-fill layer, later, on top of payee auto-fill.
 
 ## Pipeline (per ynabUpDesign.d2)
-- Deploy behind nginx reverse proxy on the Vultr VPS (Docker).
+- Done: deployed on the Vultr VPS via Docker, behind nginx with a real
+  Let's Encrypt cert, at https://budget.lotsandlotsofsausages.info. Real Up
+  webhook registered and confirmed working. BankSync runs on the cron
+  backfill only (its own webhook was never fixed - see below).
+- Important: the VPS is now the sole production instance against the real
+  budget. Don't run `go run .` / `-serve` locally against the real `.env` at
+  the same time - two instances syncing the same accounts risks duplicate
+  processing and YNAB rate-limit contention. Local runs should stick to the
+  test budget unless deliberately debugging production.
 
 ## BankSync account management
 - `BANKSYNC_ACCOUNT_MAP` is a manually-maintained JSON blob in `.env` - if a
