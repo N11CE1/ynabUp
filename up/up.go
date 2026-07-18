@@ -30,6 +30,12 @@ type Transaction struct {
 		} `json:"amount"`
 		CreatedAt time.Time  `json:"createdAt"`
 		SettledAt *time.Time `json:"settledAt"`
+		// TransactionType distinguishes a real two-sided transfer
+		// ("Transfer", with a matching record on the other account) from
+		// one-sided attributions like "Round Up" or "Cover", which set
+		// TransferAccount for display purposes only and have no paired
+		// transaction to link against.
+		TransactionType string `json:"transactionType"`
 	} `json:"attributes"`
 	Relationships struct {
 		Account struct {

@@ -70,12 +70,20 @@ func SyncTransaction(db *sql.DB, ynabTxn ynab.Transaction, cfg Config) (skipped 
 }
 
 // SyncUpTransaction resolves which mapped Up account a transaction belongs
-// to and syncs it to YNAB. If the transaction is an internal transfer (per
-// Up's transferAccount relationship) between two mapped Up accounts, it's
-// posted as a real linked YNAB transfer instead of a normal transaction:
-// only the outflow side is posted (using the destination account's transfer
-// payee), since YNAB creates the inflow side automatically. The inflow side
-// is recorded as handled without being posted, so it isn't reprocessed.
+// to and syncs it to YNAB. If the transaction is a real two-sided transfer
+// (transactionType "Transfer", per Up's transferAccount relationship)
+// between two mapped Up accounts, it's posted as a real linked YNAB
+// transfer instead of a normal transaction: only the outflow side is
+// posted (using the destination account's transfer payee), since YNAB
+// creates the inflow side automatically. The inflow side is recorded as
+// handled without being posted, so it isn't reprocessed.
+//
+// One-sided attributions like "Round Up" or "Cover" also set
+// TransferAccount (for display purposes) but have no matching record on
+// the other account - linking those would silently and permanently drop
+// them waiting for an outflow that will never arrive, so only
+// transactionType "Transfer" is treated as linkable; everything else
+// falls through to a normal transaction regardless of TransferAccount.
 func SyncUpTransaction(db *sql.DB, txn up.Transaction, cfg Config) (skipped bool, err error) {
 	accountID, ok := cfg.UpAccountMap[txn.Relationships.Account.Data.ID]
 	if !ok {
@@ -83,7 +91,7 @@ func SyncUpTransaction(db *sql.DB, txn up.Transaction, cfg Config) (skipped bool
 	}
 
 	transferAccount := txn.Relationships.TransferAccount.Data
-	if transferAccount == nil {
+	if transferAccount == nil || txn.Attributes.TransactionType != "Transfer" {
 		return SyncTransaction(db, ynab.Transform(txn, accountID), cfg)
 	}
 
