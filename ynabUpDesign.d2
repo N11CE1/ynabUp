@@ -11,7 +11,10 @@ up: Up Bank {
 
 banksync: BankSync (CommBank via CDR) {
   api: REST API
-  webhook: Webhook destination
+  webhook: Webhook destination {
+    style.opacity: 0.4
+    tooltip: Built and tested, but dormant in production - BankSync's own sync-job has an unresolved platform bug, so no real events are ever delivered here. CommBank data flows entirely through the backfill path instead.
+  }
 }
 
 ynab: YNAB {
@@ -19,23 +22,30 @@ ynab: YNAB {
 }
 
 vps: Vultr VPS (Melbourne) {
-  nginx: Nginx reverse proxy
+  nginx: Nginx reverse proxy {
+    tooltip: budget.lotsandlotsofsausages.info, Let's Encrypt TLS, proxies to the container on 127.0.0.1 only
+  }
 
   svc: upsync (Go, Docker) {
     up_handler: "Up webhook handler" {
       tooltip: Verifies X-Up-Authenticity-Signature (HMAC-SHA256), fetches the single referenced txn by ID
     }
     bs_handler: BankSync webhook handler {
-      tooltip: Verifies Standard Webhooks signature (HMAC-SHA256, 5-min replay window)
+      style.opacity: 0.4
+      tooltip: Verifies Standard Webhooks signature (HMAC-SHA256, 5-min replay window) - built and tested, but not wired to a live BankSync webhook in production. See banksync.webhook.
     }
     poller: Up one-shot sync {
-      tooltip: Fetches the current page of Up transactions
+      tooltip: 'Incremental fetch via filter[since] and a persisted watermark, not a full refetch'
     }
     backfill: BankSync backfill {
-      tooltip: Pulls a given date range directly via BankSync's REST API - no webhook involved
+      tooltip: Pulls a rolling recent window directly via BankSync's REST API - the actual (only) way CommBank data syncs, independent of any webhook
+    }
+    cron_loop: Cron loop {
+      shape: hexagon
+      tooltip: In-process background goroutine started by -serve, not an OS cron job - runs immediately on startup, then every CRON_INTERVAL (default 1h)
     }
     transformer: Transformer {
-      tooltip: base units/dollars -> milliunits, payee + date mapping
+      tooltip: base units/dollars -> milliunits, payee + date mapping, plus Up-to-Up transfer linking (transferAccount + transactionType "Transfer" -> real YNAB transfer via payee_id)
     }
     ynab_client: YNAB client {
       tooltip: import_id = source txn ID (hashed if over 36 chars), idempotent, retries on rate limit
@@ -51,24 +61,26 @@ vps: Vultr VPS (Melbourne) {
     transformer -> ynab_client
     ynab_client -> db: record synced IDs
     ynab_client <- db: skip already-synced
-  }
 
-  cron: Cron (nightly) {
-    shape: hexagon
+    cron_loop -> poller: safety net for missed webhooks
+    cron_loop -> backfill: primary sync path (not a safety net - the only path)
   }
 
   nginx -> svc.up_handler: "/webhooks/up"
-  nginx -> svc.bs_handler: "/webhooks/banksync"
-  cron -> svc.poller: reconcile safety net
+  nginx -> svc.bs_handler: "/webhooks/banksync" {
+    style.opacity: 0.4
+  }
 }
 
 # Fast path (push)
 up.webhooks -> vps.nginx: TRANSACTION_SETTLED\n(signed POST) {
   style.stroke-dash: 0
 }
-banksync.webhook -> vps.nginx: CommBank txns (POST)
+banksync.webhook -> vps.nginx: CommBank txns (POST) {
+  style.opacity: 0.4
+}
 
 # Data path (pull + write)
-vps.svc.poller -> up.api: GET /transactions\n(full details)
+vps.svc.poller -> up.api: "GET /transactions\n(filter[since])"
 vps.svc.backfill -> banksync.api: "GET /transactions?from&to"
 vps.svc.ynab_client -> ynab.api: "POST /budgets/{id}/transactions"
