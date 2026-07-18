@@ -1,0 +1,15 @@
+services:
+  ynabup:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - DB_PATH=/data/sync.db
+    volumes:
+      - ynabup-data:/data
+    restart: unless-stopped
+
+volumes:
+  ynabup-data:

@@ -1,0 +1,8 @@
+.git
+.env
+sync.db
+sync_real.db
+*.db
+TODO.md
+README.md
+ynabUpDesign.d2
