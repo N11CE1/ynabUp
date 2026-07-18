@@ -26,6 +26,13 @@ Deferred ideas and known gaps, not urgent yet but worth remembering.
 - CommBank's CDR consent (via BankSync) expires ~2027-07-16 (12-month
   window) and needs renewing in the BankSync app before then, or the
   connection lapses.
+- Not yet, but worth considering later: CommBank activity is expected to
+  drop to roughly one transaction a week as banking moves to Up, small
+  enough to enter manually. At that point, dropping the BankSync
+  integration entirely (backfill, webhook receiver, account map, the
+  monthly cost) would simplify the codebase - remove the `banksync`
+  package, its cron pass, and related config once CommBank is no longer
+  worth paying BankSync to track.
 
 ## Cross-account transfers
 - Up-to-Up transfers (Spending <-> Saver <-> 2Up) are done - Up's
