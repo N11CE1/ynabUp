@@ -70,20 +70,25 @@ func SyncTransaction(db *sql.DB, ynabTxn ynab.Transaction, cfg Config) (skipped 
 }
 
 // SyncUpTransaction resolves which mapped Up account a transaction belongs
-// to and syncs it to YNAB. If the transaction is a real two-sided transfer
-// (transactionType "Transfer", per Up's transferAccount relationship)
-// between two mapped Up accounts, it's posted as a real linked YNAB
-// transfer instead of a normal transaction: only the outflow side is
-// posted (using the destination account's transfer payee), since YNAB
-// creates the inflow side automatically. The inflow side is recorded as
-// handled without being posted, so it isn't reprocessed.
+// to and syncs it to YNAB, handling three cases:
 //
-// One-sided attributions like "Round Up" or "Cover" also set
-// TransferAccount (for display purposes) but have no matching record on
-// the other account - linking those would silently and permanently drop
-// them waiting for an outflow that will never arrive, so only
-// transactionType "Transfer" is treated as linkable; everything else
-// falls through to a normal transaction regardless of TransferAccount.
+//  1. Not a transfer (no TransferAccount): posted as a normal transaction.
+//
+//  2. A real two-sided transfer (TransactionType "Transfer"): both accounts
+//     have their own matching Up transaction record. Only the outflow side
+//     posts, as a real linked YNAB transfer (via the destination account's
+//     transfer payee); the inflow side is recorded as handled without being
+//     posted, since YNAB creates it automatically.
+//
+//  3. A one-sided attribution (e.g. "Round Up", "Cover"): Up sets
+//     TransferAccount for display purposes, but - unlike a real transfer -
+//     creates no matching record on the other account. Only the inflow
+//     record exists (e.g. the Saver gaining a round-up), and the money
+//     that actually left the source account would otherwise never be
+//     reflected in YNAB at all. Since this transaction already carries
+//     everything needed (source via TransferAccount, amount, date), the
+//     missing outflow is constructed from it directly and posted to the
+//     source as a linked transfer, same mechanism as case 2.
 func SyncUpTransaction(db *sql.DB, txn up.Transaction, cfg Config) (skipped bool, err error) {
 	accountID, ok := cfg.UpAccountMap[txn.Relationships.Account.Data.ID]
 	if !ok {
@@ -91,40 +96,70 @@ func SyncUpTransaction(db *sql.DB, txn up.Transaction, cfg Config) (skipped bool
 	}
 
 	transferAccount := txn.Relationships.TransferAccount.Data
-	if transferAccount == nil || txn.Attributes.TransactionType != "Transfer" {
+	if transferAccount == nil {
 		return SyncTransaction(db, ynab.Transform(txn, accountID), cfg)
 	}
 
-	destinationAccountID, tracked := cfg.UpAccountMap[transferAccount.ID]
+	otherAccountID, tracked := cfg.UpAccountMap[transferAccount.ID]
 	if !tracked {
-		// Transfer involves an Up account we're not syncing - there's no
-		// YNAB account to link it to, so treat it as a normal transaction.
+		// The other side involves an Up account we're not syncing - no
+		// YNAB account to link to, so treat it as a normal transaction.
 		return SyncTransaction(db, ynab.Transform(txn, accountID), cfg)
+	}
+
+	if txn.Attributes.TransactionType == "Transfer" {
+		if txn.Attributes.Amount.ValueInBaseUnits >= 0 {
+			return suppressAsHandled(db, txn.ID)
+		}
+		return postAsLinkedTransfer(db, txn, accountID, otherAccountID, false, cfg)
 	}
 
 	if txn.Attributes.Amount.ValueInBaseUnits >= 0 {
-		// The inflow side of a transfer between two mapped accounts - YNAB
-		// creates this automatically once the outflow side posts, so just
-		// record it as handled rather than posting it independently.
-		importID := ynab.SafeImportID(txn.ID)
-		alreadySynced, err := store.IsSynced(db, importID)
-		if err != nil {
-			return false, fmt.Errorf("checking sync state: %w", err)
-		}
-		if !alreadySynced {
-			if err := store.MarkSynced(db, importID); err != nil {
-				return false, fmt.Errorf("recording transfer inflow as handled: %w", err)
-			}
-		}
-		return true, nil
+		// One-sided inflow (Round Up, Cover, ...): construct the missing
+		// outflow from this same transaction, posted to the source account
+		// with the sign flipped, rather than letting the money vanish.
+		return postAsLinkedTransfer(db, txn, otherAccountID, accountID, true, cfg)
 	}
 
+	// A negative amount with TransferAccount set but not type "Transfer" -
+	// not a pattern seen in practice; fall back to a normal post rather
+	// than guess at a linking direction.
+	return SyncTransaction(db, ynab.Transform(txn, accountID), cfg)
+}
+
+// suppressAsHandled records upTxnID as synced without posting anything to
+// YNAB - used for the inflow side of a real transfer, which YNAB creates
+// automatically once the matching outflow side posts.
+func suppressAsHandled(db *sql.DB, upTxnID string) (skipped bool, err error) {
+	importID := ynab.SafeImportID(upTxnID)
+	alreadySynced, err := store.IsSynced(db, importID)
+	if err != nil {
+		return false, fmt.Errorf("checking sync state: %w", err)
+	}
+	if !alreadySynced {
+		if err := store.MarkSynced(db, importID); err != nil {
+			return false, fmt.Errorf("recording transfer inflow as handled: %w", err)
+		}
+	}
+	return true, nil
+}
+
+// postAsLinkedTransfer builds a YNAB transaction from txn for accountID and
+// posts it with PayeeID set to destinationAccountID's transfer payee,
+// making YNAB create a real linked transfer. flipSign negates the amount
+// first, needed when constructing a synthetic outflow on behalf of a
+// one-sided inflow record (Up's Round Up gives us the inflow's positive
+// amount; the outflow we're posting on its behalf needs the negative).
+func postAsLinkedTransfer(db *sql.DB, txn up.Transaction, accountID, destinationAccountID string, flipSign bool, cfg Config) (skipped bool, err error) {
 	transferPayeeID, ok := cfg.YnabTransferPayeeIDs[destinationAccountID]
 	if !ok {
 		return false, fmt.Errorf("no transfer_payee_id known for YNAB account %s", destinationAccountID)
 	}
 
 	ynabTxn := ynab.Transform(txn, accountID)
+	if flipSign {
+		ynabTxn.Amount = -ynabTxn.Amount
+	}
 	ynabTxn.PayeeName = ""
 	ynabTxn.PayeeID = transferPayeeID
 
