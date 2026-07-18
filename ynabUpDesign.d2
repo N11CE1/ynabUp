@@ -1,86 +1,331 @@
-direction: right
+vars: {
+  d2-config: {
+    theme-id: 0
+  }
+}
+
+direction: down
+style.fill: "#12141c"
 
 title: |md
-  # upsync — Up Bank → YNAB sync
-| {near: top-center}
+  # ynabUp — Up Bank → YNAB sync
+| {
+  near: top-center
+  style: {
+    font-color: "#EEF1F8"
+    font: mono
+  }
+}
 
 up: Up Bank {
-  api: REST API
-  webhooks: Webhook sender
+  tooltip: REST API + webhook sender (TRANSACTION_SETTLED, signed POST)
+  style: {
+    fill: "#3D3616"
+    stroke: "#FFEF6B"
+    stroke-width: 3
+    font-color: "#FFEF6B"
+    shadow: true
+    border-radius: 12
+    font-size: 22
+    font: mono
+    bold: true
+  }
 }
 
 banksync: BankSync (CommBank via CDR) {
-  api: REST API
-  webhook: Webhook destination {
-    style.opacity: 0.4
-    tooltip: Built and tested, but dormant in production - BankSync's own sync-job has an unresolved platform bug, so no real events are ever delivered here. CommBank data flows entirely through the backfill path instead.
+  tooltip: REST API + a webhook destination (dormant - see the dashed path below)
+  style: {
+    fill: "#2C2F3D"
+    stroke: "#9499AB"
+    font-color: "#CFD2DD"
+    font: mono
+    shadow: true
+    border-radius: 12
+    font-size: 20
   }
 }
 
 ynab: YNAB {
-  api: REST API
+  tooltip: 'REST API - POST /budgets/{id}/transactions'
+  style: {
+    fill: "#242873"
+    stroke: "#8B90FF"
+    stroke-width: 3
+    font-color: "#D6D8FF"
+    font: mono
+    shadow: true
+    border-radius: 12
+    font-size: 22
+    bold: true
+  }
 }
 
 vps: Vultr VPS (Melbourne) {
+  style: {
+    fill: "#1A1D29"
+    stroke: "#AEE865"
+    stroke-width: 2
+    shadow: true
+    border-radius: 14
+    font-color: "#AEE865"
+    font: mono
+    font-size: 20
+  }
+
   nginx: Nginx reverse proxy {
+    style: {
+      fill: "#242833"
+      stroke: "#AEE865"
+      font-color: "#EEF1F8"
+      font: mono
+      shadow: true
+      border-radius: 8
+    }
     tooltip: budget.lotsandlotsofsausages.info, Let's Encrypt TLS, proxies to the container on 127.0.0.1 only
   }
 
   svc: upsync (Go, Docker) {
-    up_handler: "Up webhook handler" {
-      tooltip: Verifies X-Up-Authenticity-Signature (HMAC-SHA256), fetches the single referenced txn by ID
-    }
-    bs_handler: BankSync webhook handler {
-      style.opacity: 0.4
-      tooltip: Verifies Standard Webhooks signature (HMAC-SHA256, 5-min replay window) - built and tested, but not wired to a live BankSync webhook in production. See banksync.webhook.
-    }
-    poller: Up one-shot sync {
-      tooltip: 'Incremental fetch via filter[since] and a persisted watermark, not a full refetch'
-    }
-    backfill: BankSync backfill {
-      tooltip: Pulls a rolling recent window directly via BankSync's REST API - the actual (only) way CommBank data syncs, independent of any webhook
-    }
-    cron_loop: Cron loop {
-      shape: hexagon
-      tooltip: In-process background goroutine started by -serve, not an OS cron job - runs immediately on startup, then every CRON_INTERVAL (default 1h)
-    }
-    transformer: Transformer {
-      tooltip: base units/dollars -> milliunits, payee + date mapping, plus Up-to-Up transfer linking (transferAccount + transactionType "Transfer" -> real YNAB transfer via payee_id)
-    }
-    ynab_client: YNAB client {
-      tooltip: import_id = source txn ID (hashed if over 36 chars), idempotent, retries on rate limit
-    }
-    db: SQLite state {
-      shape: cylinder
+    direction: right
+    style: {
+      fill: "#0D0E15"
+      stroke: "#535BFE"
+      font-color: "#EEF1F8"
+      font: mono
+      border-radius: 10
     }
 
-    up_handler -> transformer
-    bs_handler -> transformer
-    poller -> transformer
-    backfill -> transformer
-    transformer -> ynab_client
-    ynab_client -> db: record synced IDs
-    ynab_client <- db: skip already-synced
+    entrypoints: "" {
+      direction: down
+      style: {
+        fill: transparent
+        stroke: transparent
+      }
 
-    cron_loop -> poller: safety net for missed webhooks
-    cron_loop -> backfill: primary sync path (not a safety net - the only path)
+      up_handler: "Up webhook\nhandler" {
+        style: {
+          fill: "#6B5A1C"
+          stroke: "#FFEF6B"
+          stroke-width: 2
+          font-color: "#FFEF6B"
+          font: mono
+          shadow: true
+          border-radius: 8
+        }
+        tooltip: Verifies X-Up-Authenticity-Signature (HMAC-SHA256), fetches the single referenced txn by ID
+      }
+      poller: "Up one-shot\nsync" {
+        style: {
+          fill: "#6B5A1C"
+          stroke: "#FFEF6B"
+          stroke-width: 2
+          font-color: "#FFEF6B"
+          font: mono
+          shadow: true
+          border-radius: 8
+        }
+        tooltip: 'Incremental fetch via filter[since] and a persisted watermark, not a full refetch'
+      }
+      bs_handler: "BankSync webhook\nhandler" {
+        style: {
+          fill: "#33384A"
+          stroke: "#9499AB"
+          font-color: "#CFD2DD"
+          font: mono
+          opacity: 0.75
+          stroke-dash: 4
+        }
+        tooltip: Verifies Standard Webhooks signature (HMAC-SHA256, 5-min replay window) - built and tested, but not wired to a live BankSync webhook in production. See banksync.webhook.
+      }
+      backfill: "BankSync\nbackfill" {
+        style: {
+          fill: "#33384A"
+          stroke: "#9499AB"
+          font-color: "#EEF1F8"
+          font: mono
+          shadow: true
+          border-radius: 8
+        }
+        tooltip: Pulls a rolling recent window directly via BankSync's REST API - the actual (only) way CommBank data syncs, independent of any webhook
+      }
+      cron_loop: "Cron loop" {
+        shape: hexagon
+        style: {
+          fill: "#2A3324"
+          stroke: "#AEE865"
+          font-color: "#AEE865"
+          font: mono
+          shadow: true
+        }
+        tooltip: In-process background goroutine started by -serve, not an OS cron job - runs immediately on startup, then every CRON_INTERVAL (default 1h)
+      }
+
+      cron_loop -> poller: safety net {
+        style: {
+          stroke: "#AEE865"
+          font-color: "#EEF1F8"
+          font: mono
+        }
+      }
+      cron_loop -> backfill: primary path {
+        style: {
+          stroke: "#AEE865"
+          font-color: "#EEF1F8"
+          font: mono
+        }
+      }
+    }
+
+    pipeline: "" {
+      direction: down
+      style: {
+        fill: transparent
+        stroke: transparent
+      }
+
+      transformer: Transformer {
+        style: {
+          fill: "#242833"
+          stroke: "#EEF1F8"
+          font-color: "#EEF1F8"
+          font: mono
+          shadow: true
+          border-radius: 8
+        }
+        tooltip: base units/dollars -> milliunits, payee + date mapping, plus Up-to-Up transfer linking (transferAccount + transactionType "Transfer" -> real YNAB transfer via payee_id)
+      }
+      ynab_client: "YNAB\nclient" {
+        style: {
+          fill: "#2E3399"
+          stroke: "#8B90FF"
+          stroke-width: 2
+          font-color: "#D6D8FF"
+          font: mono
+          shadow: true
+          border-radius: 8
+        }
+        tooltip: import_id = source txn ID (hashed if over 36 chars), idempotent, retries on rate limit
+      }
+      db: "SQLite\nstate" {
+        shape: cylinder
+        style: {
+          fill: "#242833"
+          stroke: "#EEF1F8"
+          font-color: "#EEF1F8"
+          font: mono
+          shadow: true
+        }
+      }
+
+      transformer -> ynab_client {
+        style: {
+          stroke: "#8B90FF"
+          font-color: "#EEF1F8"
+          font: mono
+        }
+      }
+      ynab_client -> db: record synced IDs {
+        style: {
+          stroke: "#8B90FF"
+          font-color: "#EEF1F8"
+          font: mono
+        }
+      }
+      ynab_client <- db: skip already-synced {
+        style: {
+          stroke: "#8B90FF"
+          font-color: "#EEF1F8"
+          font: mono
+        }
+      }
+    }
+
+    entrypoints.up_handler -> pipeline.transformer {
+      style: {
+        stroke: "#FFEF6B"
+        font-color: "#EEF1F8"
+        font: mono
+      }
+    }
+    entrypoints.bs_handler -> pipeline.transformer {
+      style: {
+        stroke: "#9499AB"
+        font-color: "#EEF1F8"
+        font: mono
+        opacity: 0.75
+        stroke-dash: 4
+      }
+    }
+    entrypoints.poller -> pipeline.transformer {
+      style: {
+        stroke: "#FFEF6B"
+        font-color: "#EEF1F8"
+        font: mono
+      }
+    }
+    entrypoints.backfill -> pipeline.transformer {
+      style: {
+        stroke: "#9499AB"
+        font-color: "#EEF1F8"
+        font: mono
+      }
+    }
   }
 
-  nginx -> svc.up_handler: "/webhooks/up"
-  nginx -> svc.bs_handler: "/webhooks/banksync" {
-    style.opacity: 0.4
+  nginx -> svc.entrypoints.up_handler: "/webhooks/up" {
+    style: {
+      stroke: "#AEE865"
+      font-color: "#EEF1F8"
+      font: mono
+    }
+  }
+  nginx -> svc.entrypoints.bs_handler: "/webhooks/banksync" {
+    style: {
+      opacity: 0.75
+      stroke-dash: 4
+      font-color: "#EEF1F8"
+      font: mono
+    }
   }
 }
 
 # Fast path (push)
-up.webhooks -> vps.nginx: TRANSACTION_SETTLED\n(signed POST) {
-  style.stroke-dash: 0
+up -> vps.nginx: TRANSACTION_SETTLED\n(signed POST) {
+  style: {
+    stroke: "#FFEF6B"
+    stroke-width: 2
+    font-color: "#EEF1F8"
+    font: mono
+  }
 }
-banksync.webhook -> vps.nginx: CommBank txns (POST) {
-  style.opacity: 0.4
+banksync -> vps.nginx: CommBank txns (POST) {
+  style: {
+    opacity: 0.75
+    stroke-dash: 4
+    font-color: "#EEF1F8"
+    font: mono
+  }
 }
 
 # Data path (pull + write)
-vps.svc.poller -> up.api: "GET /transactions\n(filter[since])"
-vps.svc.backfill -> banksync.api: "GET /transactions?from&to"
-vps.svc.ynab_client -> ynab.api: "POST /budgets/{id}/transactions"
+vps.svc.entrypoints.poller -> up: "GET /transactions\n(filter[since])" {
+  style: {
+    stroke: "#FFEF6B"
+    font-color: "#EEF1F8"
+    font: mono
+  }
+}
+vps.svc.entrypoints.backfill -> banksync: "GET /transactions?from&to" {
+  style: {
+    stroke: "#9499AB"
+    font-color: "#EEF1F8"
+    font: mono
+  }
+}
+vps.svc.pipeline.ynab_client -> ynab: "POST /budgets/{id}/transactions" {
+  style: {
+    stroke: "#8B90FF"
+    stroke-width: 2
+    font-color: "#EEF1F8"
+    font: mono
+  }
+}
