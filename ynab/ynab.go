@@ -97,6 +97,95 @@ func FetchAccounts(budgetID, token string) ([]Account, error) {
 	return result.Data.Accounts, nil
 }
 
+type Category struct {
+	ID       string `json:"id"`
+	Budgeted int64  `json:"budgeted"`
+}
+
+type categoryResponse struct {
+	Data struct {
+		Category Category `json:"category"`
+	} `json:"data"`
+}
+
+type categoryUpdateRequest struct {
+	Category struct {
+		Budgeted int64 `json:"budgeted"`
+	} `json:"category"`
+}
+
+// GetCategory retrieves categoryID's budgeted amount for the current month.
+func GetCategory(budgetID, categoryID, token string) (Category, error) {
+	url := fmt.Sprintf("%s/budgets/%s/months/current/categories/%s", APIBaseURL, budgetID, categoryID)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return Category{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return Category{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return Category{}, fmt.Errorf("unexpected status: %s: %s", resp.Status, respBody)
+	}
+
+	var result categoryResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return Category{}, err
+	}
+
+	return result.Data.Category, nil
+}
+
+// FundCategory increases categoryID's current-month budgeted amount by
+// deltaMilliunits. Used to reflect a transfer into a savings account in the
+// category YNAB otherwise never touches, since a transfer moves cash
+// between accounts without assigning any category dollars. Not atomic - a
+// concurrent budget edit between the read and the write here could be
+// clobbered, an acceptable risk for a single-instance, low-volume service.
+func FundCategory(budgetID, categoryID string, deltaMilliunits int64, token string) error {
+	current, err := GetCategory(budgetID, categoryID, token)
+	if err != nil {
+		return fmt.Errorf("reading category before funding: %w", err)
+	}
+
+	var update categoryUpdateRequest
+	update.Category.Budgeted = current.Budgeted + deltaMilliunits
+
+	body, err := json.Marshal(update)
+	if err != nil {
+		return err
+	}
+
+	url := fmt.Sprintf("%s/budgets/%s/months/current/categories/%s", APIBaseURL, budgetID, categoryID)
+	req, err := http.NewRequest("PATCH", url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unexpected status: %s: %s", resp.Status, respBody)
+	}
+
+	return nil
+}
+
 // Transform converts an Up transaction into YNAB's expected shape:
 // cents -> milliunits, and Up's settledAt presence -> YNAB's cleared status.
 func Transform(txn up.Transaction, accountID string) Transaction {

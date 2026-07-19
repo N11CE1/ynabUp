@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -89,6 +90,25 @@ func parseAccountMap(envVar string) map[string]string {
 	return accountMap
 }
 
+// parseAccountIDSet parses a comma-separated list of YNAB account IDs,
+// used to identify which accounts should trigger a savings category
+// funding bump when a linked transfer lands in them.
+func parseAccountIDSet(envVar string) map[string]bool {
+	raw := os.Getenv(envVar)
+	if raw == "" {
+		return nil
+	}
+
+	ids := make(map[string]bool)
+	for id := range strings.SplitSeq(raw, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			ids[id] = true
+		}
+	}
+
+	return ids
+}
+
 // fetchYnabTransferPayeeIDs looks up each account's transfer payee ID, used
 // to post real linked transfers between two mapped accounts.
 func fetchYnabTransferPayeeIDs(budgetID, token string) map[string]string {
@@ -138,6 +158,8 @@ func main() {
 		BankSyncWebhookSecret: os.Getenv("BANKSYNC_WEBHOOK_SECRET"),
 		BankSyncAccountMap:    parseAccountMap("BANKSYNC_ACCOUNT_MAP"),
 		YnabTransferPayeeIDs:  fetchYnabTransferPayeeIDs(budgetID, ynabToken),
+		SavingsAccountIDs:     parseAccountIDSet("YNAB_SAVINGS_ACCOUNT_IDS"),
+		SavingsCategoryID:     os.Getenv("YNAB_SAVINGS_CATEGORY_ID"),
 		BudgetID:              budgetID,
 		YnabToken:             ynabToken,
 	}

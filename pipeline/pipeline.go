@@ -35,6 +35,19 @@ type Config struct {
 	// ynab.Transaction.PayeeID rather than a normal PayeeName transaction.
 	YnabTransferPayeeIDs map[string]string
 
+	// SavingsAccountIDs are YNAB account IDs that a linked transfer can land
+	// in as its destination. YNAB transfers move cash between accounts but
+	// never touch a category's assigned amount, so without this a transfer
+	// into savings (e.g. Up's Round Up) would leave SavingsCategoryID never
+	// reflecting money that's actually been set aside. Left unset, no
+	// category funding happens.
+	SavingsAccountIDs map[string]bool
+	// SavingsCategoryID is the single YNAB category bumped by the amount of
+	// any transfer landing in a SavingsAccountIDs account. Funded from
+	// nowhere else - Ready to Assign goes negative by the same amount until
+	// manually covered.
+	SavingsCategoryID string
+
 	BudgetID  string
 	YnabToken string
 }
@@ -163,7 +176,22 @@ func postAsLinkedTransfer(db *sql.DB, txn up.Transaction, accountID, destination
 	ynabTxn.PayeeName = ""
 	ynabTxn.PayeeID = transferPayeeID
 
-	return SyncTransaction(db, ynabTxn, cfg)
+	skipped, err = SyncTransaction(db, ynabTxn, cfg)
+	if err != nil || skipped {
+		return skipped, err
+	}
+
+	if cfg.SavingsAccountIDs[destinationAccountID] && cfg.SavingsCategoryID != "" {
+		amount := ynabTxn.Amount
+		if amount < 0 {
+			amount = -amount
+		}
+		if err := ynab.FundCategory(cfg.BudgetID, cfg.SavingsCategoryID, amount, cfg.YnabToken); err != nil {
+			log.Printf("posted transfer %s but failed to fund savings category: %v", txn.ID, err)
+		}
+	}
+
+	return skipped, nil
 }
 
 const upWatermarkKey = "up_last_synced_at"
