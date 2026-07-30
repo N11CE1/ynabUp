@@ -13,8 +13,8 @@ import (
 )
 
 // Config bundles the credentials and IDs shared across sync entry points
-// (one-shot sync, Up webhook, BankSync webhook), so they don't need to be
-// threaded individually through every function.
+// (one-shot sync, Up webhook), so they don't need to be threaded
+// individually through every function.
 type Config struct {
 	UpToken         string
 	UpWebhookSecret string
@@ -23,12 +23,6 @@ type Config struct {
 	// between two of the user's own Up accounts (e.g. Spending <-> Saver)
 	// detectable via Up's transferAccount relationship.
 	UpAccountMap map[string]string
-
-	BankSyncAPIToken      string
-	BankSyncWebhookSecret string
-	// BankSyncAccountMap maps a BankSync accountId to the YNAB account ID
-	// it should sync into, since BankSync may cover multiple bank accounts.
-	BankSyncAccountMap map[string]string
 
 	// YnabTransferPayeeIDs maps a YNAB account ID to that account's
 	// transfer payee ID, needed to post a real linked transfer via
@@ -55,7 +49,7 @@ type Config struct {
 // SyncTransaction checks whether a transaction has already been synced, and
 // if not, posts it to YNAB and records it as synced. Callers transform their
 // source-specific transaction into ynab.Transaction first, so this is shared
-// by the one-shot batch sync, the Up webhook, and the BankSync webhook.
+// by the one-shot batch sync and the Up webhook.
 func SyncTransaction(db *sql.DB, ynabTxn ynab.Transaction, cfg Config) (skipped bool, err error) {
 	alreadySynced, err := store.IsSynced(db, ynabTxn.ImportID)
 	if err != nil {

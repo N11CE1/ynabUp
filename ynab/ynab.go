@@ -29,7 +29,8 @@ func SafeImportID(id string) string {
 	return hex.EncodeToString(sum[:])[:maxImportIDLength]
 }
 
-const APIBaseURL = "https://api.ynab.com/v1"
+// APIBaseURL is a var, not a const, so tests can point it at a fake server.
+var APIBaseURL = "https://api.ynab.com/v1"
 
 // ErrDuplicateTransaction indicates YNAB already has a transaction with this
 // import_id on the account, e.g. from a sync predating local state tracking.

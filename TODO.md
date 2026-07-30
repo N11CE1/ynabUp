@@ -5,12 +5,6 @@
   the same real-world merchant maps to a consistent string YNAB's payee
   auto-fill can recognise across transactions.
 
-## Later
-- Once CommBank activity is confirmed low (expected to drop to roughly one
-  transaction a week as banking moves to Up, small enough to enter
-  manually), drop the BankSync integration entirely - remove the
-  `banksync` package, its cron pass, account map, and the monthly cost.
-
 ## Standing reminder
 - The VPS is the sole production instance against the real budget. Don't
   run `go run .` / `-serve` locally against the real `.env` at the same

@@ -1,7 +1,6 @@
 # ynabUp — High-Level Software Design
 
-A Go service that syncs bank transactions into YNAB, currently from Up Bank
-(primary, real-time) and CommBank via BankSync/CDR (secondary, batch). This
+A Go service that syncs Up Bank transactions into YNAB in real time. This
 document describes the architecture as built and the reasoning — including
 mistakes made along the way — worth carrying into future changes.
 
@@ -24,10 +23,6 @@ for the visual architecture diagram this document expands on.
 
 ## Non-goals
 
-- Cross-provider transfer linking (e.g. a transfer from CommBank to Up).
-  There's no shared transaction ID to match the two sides against, so these
-  post as two independent, unlinked transactions. Descoped — see
-  [TODO.md](TODO.md).
 - Categorisation or payee normalisation beyond what YNAB's own auto-fill
   provides from raw payee names.
 - Multi-user/multi-budget support. Config is one process, one YNAB budget,
@@ -37,15 +32,14 @@ for the visual architecture diagram this document expands on.
 
 ```
 up/         Up Bank REST client (fetch transactions, pagination, filter[since])
-banksync/   BankSync webhook handler + REST backfill client for CommBank
 webhook/    Up webhook handler (signature verification, single-txn fetch)
 ynab/       YNAB REST client (post transaction, fetch accounts, backoff)
 pipeline/   Core sync/transform/dedup logic, shared by every entry point
 store/      SQLite-backed sync-state tracking (synced IDs + watermark)
-main.go     CLI entrypoint: one-shot sync / -serve / -backfill
+main.go     CLI entrypoint: one-shot sync / -serve
 ```
 
-Every entry point (webhook, one-shot poll, backfill) converges on
+Every entry point (webhook, one-shot poll) converges on
 `pipeline.SyncTransaction`, so dedup and posting logic exists in exactly one
 place regardless of how a transaction was discovered.
 
@@ -56,20 +50,11 @@ place regardless of how a transaction was discovered.
 (HMAC-SHA256) → fetches the single referenced transaction by ID → runs it
 through the pipeline.
 
-**Reconciliation path (both sources, in-process cron):** a background
-goroutine started by `-serve` runs immediately on startup and then every
-`CRON_INTERVAL` (default 1h):
-- Up: `pipeline.RunOneShotSync` — incremental fetch via `filter[since]` and
-  a persisted watermark, not a full refetch. Acts as the safety net for
-  missed webhooks.
-- BankSync: `banksync.RunBackfill` over a rolling 3-day lookback window via
-  REST. This is BankSync's *only* working data path — its own webhook
-  delivery is broken on their end (never resolved; see Errors and lessons
-  below) — so the cron loop isn't optional for CommBank, it's load-bearing.
-
-**Manual backfill:** `-backfill -from -to` runs the same BankSync REST pull
-over an arbitrary date range, used for the initial real-budget backfill and
-any one-off gap-filling.
+**Reconciliation path (in-process cron):** a background goroutine started by
+`-serve` runs immediately on startup and then every `CRON_INTERVAL` (default
+1h): `pipeline.RunOneShotSync` — incremental fetch via `filter[since]` and a
+persisted watermark, not a full refetch. Acts as the safety net for missed
+webhooks.
 
 ## Why an in-process cron loop, not OS cron
 
@@ -174,16 +159,6 @@ handling — the first time a reconciliation pass hit a transient error.
 Changed to return `error`; the CLI path still exits on error, the cron
 goroutine just logs and continues.
 
-**BankSync's webhook delivery has a platform-side bug**
-(`"field mappings don't match your destination database structure"`) that
-was never resolved on their end. The webhook handler is fully built and
-tested (Standard Webhooks HMAC-SHA256 signature verification, 5-minute
-replay window) but isn't wired to a live BankSync webhook in production —
-all CommBank data flows through the cron-driven REST backfill instead. The
-handler code is kept because it's cheap to keep and the bug could be fixed
-BankSync-side without warning; if it's still dead code a year from now it's
-a candidate for deletion alongside the rest of BankSync (see below).
-
 **A stray local `-serve` process ran against the real budget with stale
 config** during VPS deployment testing — an orphaned background process
 from earlier in the session, invisible until `ps aux` was checked. No data
@@ -208,6 +183,5 @@ a single-user webhook endpoint.
 ## Known gaps / deferred work
 
 See [TODO.md](TODO.md) for the live backlog (rate-limit throttling, payee
-normalisation, BankSync's eventual removal once CommBank activity drops low
-enough to enter manually, CDR consent renewal deadline). Not duplicated
-here since that file is kept current and this one isn't meant to be.
+normalisation). Not duplicated here since that file is kept current and
+this one isn't meant to be.

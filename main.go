@@ -12,7 +12,6 @@ import (
 
 	"github.com/joho/godotenv"
 
-	"github.com/N11CE1/ynabUp/banksync"
 	"github.com/N11CE1/ynabUp/pipeline"
 	"github.com/N11CE1/ynabUp/store"
 	"github.com/N11CE1/ynabUp/webhook"
@@ -23,22 +22,15 @@ const (
 	DefaultDBPath       = "sync.db"
 	DefaultPort         = "8080"
 	DefaultCronInterval = time.Hour
-	// bankSyncCronLookback bounds each cron pass's BankSync backfill to a
-	// short rolling window, rather than rescanning the whole month every
-	// time - generous enough to catch anything that arrived late.
-	bankSyncCronLookback = 3 * 24 * time.Hour
 )
 
-// runServer starts the HTTP server that receives Up's and BankSync's
-// webhooks, and kicks off a background reconciliation loop alongside it -
-// a safety net for Up (in case a webhook was missed) and, since BankSync's
-// own webhook delivery is currently broken on their end, the only way
-// BankSync data gets synced at all.
-func runServer(db *sql.DB, cfg pipeline.Config, port, bankID string, cronInterval time.Duration) {
+// runServer starts the HTTP server that receives Up's webhook, and kicks off
+// a background reconciliation loop alongside it as a safety net in case a
+// webhook was missed.
+func runServer(db *sql.DB, cfg pipeline.Config, port string, cronInterval time.Duration) {
 	http.HandleFunc("/webhooks/up", webhook.Handler(db, cfg))
-	http.HandleFunc("/webhooks/banksync", banksync.Handler(db, cfg))
 
-	go runCronLoop(db, cfg, bankID, cronInterval)
+	go runCronLoop(db, cfg, cronInterval)
 
 	log.Printf("listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
@@ -46,36 +38,21 @@ func runServer(db *sql.DB, cfg pipeline.Config, port, bankID string, cronInterva
 
 // runCronLoop runs a reconciliation pass immediately, then every interval
 // thereafter, for as long as the process is running.
-func runCronLoop(db *sql.DB, cfg pipeline.Config, bankID string, interval time.Duration) {
+func runCronLoop(db *sql.DB, cfg pipeline.Config, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
-		runReconciliation(db, cfg, bankID)
+		log.Println("cron: running Up reconciliation sync")
+		if err := pipeline.RunOneShotSync(db, cfg); err != nil {
+			log.Printf("cron: Up reconciliation failed: %v", err)
+		}
 		<-ticker.C
 	}
 }
 
-func runReconciliation(db *sql.DB, cfg pipeline.Config, bankID string) {
-	log.Println("cron: running Up reconciliation sync")
-	if err := pipeline.RunOneShotSync(db, cfg); err != nil {
-		log.Printf("cron: Up reconciliation failed: %v", err)
-	}
-
-	if bankID == "" || len(cfg.BankSyncAccountMap) == 0 {
-		return
-	}
-
-	log.Println("cron: running BankSync backfill")
-	now := time.Now()
-	from := now.Add(-bankSyncCronLookback).Format("2006-01-02")
-	to := now.Format("2006-01-02")
-	banksync.RunBackfill(db, cfg, bankID, from, to)
-}
-
-// parseAccountMap parses a JSON object env var mapping a source account ID
-// to the YNAB account it syncs into (used for both UP_ACCOUNT_MAP and
-// BANKSYNC_ACCOUNT_MAP).
+// parseAccountMap parses a JSON object env var (UP_ACCOUNT_MAP) mapping a
+// source account ID to the YNAB account it syncs into.
 func parseAccountMap(envVar string) map[string]string {
 	raw := os.Getenv(envVar)
 	if raw == "" {
@@ -127,9 +104,6 @@ func fetchYnabTransferPayeeIDs(budgetID, token string) map[string]string {
 
 func main() {
 	serve := flag.Bool("serve", false, "run as a webhook server instead of a one-shot sync")
-	backfill := flag.Bool("backfill", false, "backfill BankSync transactions for a date range instead of a one-shot sync")
-	from := flag.String("from", "", "backfill start date (YYYY-MM-DD), defaults to the 1st of the current month")
-	to := flag.String("to", "", "backfill end date (YYYY-MM-DD), defaults to today")
 	flag.Parse()
 
 	if err := godotenv.Load(); err != nil {
@@ -151,20 +125,15 @@ func main() {
 	ynabToken := os.Getenv("YNAB_API_TOKEN")
 
 	cfg := pipeline.Config{
-		UpToken:               os.Getenv("UP_API_TOKEN"),
-		UpWebhookSecret:       os.Getenv("UP_WEBHOOK_SECRET"),
-		UpAccountMap:          parseAccountMap("UP_ACCOUNT_MAP"),
-		BankSyncAPIToken:      os.Getenv("BANKSYNC_API_TOKEN"),
-		BankSyncWebhookSecret: os.Getenv("BANKSYNC_WEBHOOK_SECRET"),
-		BankSyncAccountMap:    parseAccountMap("BANKSYNC_ACCOUNT_MAP"),
-		YnabTransferPayeeIDs:  fetchYnabTransferPayeeIDs(budgetID, ynabToken),
-		SavingsAccountIDs:     parseAccountIDSet("YNAB_SAVINGS_ACCOUNT_IDS"),
-		SavingsCategoryID:     os.Getenv("YNAB_SAVINGS_CATEGORY_ID"),
-		BudgetID:              budgetID,
-		YnabToken:             ynabToken,
+		UpToken:              os.Getenv("UP_API_TOKEN"),
+		UpWebhookSecret:      os.Getenv("UP_WEBHOOK_SECRET"),
+		UpAccountMap:         parseAccountMap("UP_ACCOUNT_MAP"),
+		YnabTransferPayeeIDs: fetchYnabTransferPayeeIDs(budgetID, ynabToken),
+		SavingsAccountIDs:    parseAccountIDSet("YNAB_SAVINGS_ACCOUNT_IDS"),
+		SavingsCategoryID:    os.Getenv("YNAB_SAVINGS_CATEGORY_ID"),
+		BudgetID:             budgetID,
+		YnabToken:            ynabToken,
 	}
-
-	bankID := os.Getenv("BANKSYNC_BANK_ID")
 
 	if *serve {
 		port := os.Getenv("PORT")
@@ -181,26 +150,7 @@ func main() {
 			cronInterval = d
 		}
 
-		runServer(db, cfg, port, bankID, cronInterval)
-		return
-	}
-
-	if *backfill {
-		now := time.Now()
-		fromDate := *from
-		if fromDate == "" {
-			fromDate = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location()).Format("2006-01-02")
-		}
-		toDate := *to
-		if toDate == "" {
-			toDate = now.Format("2006-01-02")
-		}
-
-		if bankID == "" {
-			log.Fatal("BANKSYNC_BANK_ID must be set to backfill")
-		}
-
-		banksync.RunBackfill(db, cfg, bankID, fromDate, toDate)
+		runServer(db, cfg, port, cronInterval)
 		return
 	}
 

@@ -32,19 +32,6 @@ up: Up Bank {
   }
 }
 
-banksync: BankSync (CommBank via CDR) {
-  tooltip: REST API + a webhook destination (dormant - see the dashed path below)
-  style: {
-    fill: "#2C2F3D"
-    stroke: "#9499AB"
-    font-color: "#CFD2DD"
-    font: mono
-    shadow: true
-    border-radius: 12
-    font-size: 20
-  }
-}
-
 ynab: YNAB {
   tooltip: 'REST API - POST /budgets/{id}/transactions'
   style: {
@@ -125,28 +112,6 @@ vps: Vultr VPS (Melbourne) {
         }
         tooltip: 'Incremental fetch via filter[since] and a persisted watermark, not a full refetch'
       }
-      bs_handler: "BankSync webhook\nhandler" {
-        style: {
-          fill: "#33384A"
-          stroke: "#9499AB"
-          font-color: "#CFD2DD"
-          font: mono
-          opacity: 0.75
-          stroke-dash: 4
-        }
-        tooltip: Verifies Standard Webhooks signature (HMAC-SHA256, 5-min replay window) - built and tested, but not wired to a live BankSync webhook in production. See banksync.webhook.
-      }
-      backfill: "BankSync\nbackfill" {
-        style: {
-          fill: "#33384A"
-          stroke: "#9499AB"
-          font-color: "#EEF1F8"
-          font: mono
-          shadow: true
-          border-radius: 8
-        }
-        tooltip: Pulls a rolling recent window directly via BankSync's REST API - the actual (only) way CommBank data syncs, independent of any webhook
-      }
       cron_loop: "Cron loop" {
         shape: hexagon
         style: {
@@ -160,13 +125,6 @@ vps: Vultr VPS (Melbourne) {
       }
 
       cron_loop -> poller: safety net {
-        style: {
-          stroke: "#AEE865"
-          font-color: "#EEF1F8"
-          font: mono
-        }
-      }
-      cron_loop -> backfill: primary path {
         style: {
           stroke: "#AEE865"
           font-color: "#EEF1F8"
@@ -246,25 +204,9 @@ vps: Vultr VPS (Melbourne) {
         font: mono
       }
     }
-    entrypoints.bs_handler -> pipeline.transformer {
-      style: {
-        stroke: "#9499AB"
-        font-color: "#EEF1F8"
-        font: mono
-        opacity: 0.75
-        stroke-dash: 4
-      }
-    }
     entrypoints.poller -> pipeline.transformer {
       style: {
         stroke: "#FFEF6B"
-        font-color: "#EEF1F8"
-        font: mono
-      }
-    }
-    entrypoints.backfill -> pipeline.transformer {
-      style: {
-        stroke: "#9499AB"
         font-color: "#EEF1F8"
         font: mono
       }
@@ -274,14 +216,6 @@ vps: Vultr VPS (Melbourne) {
   nginx -> svc.entrypoints.up_handler: "/webhooks/up" {
     style: {
       stroke: "#AEE865"
-      font-color: "#EEF1F8"
-      font: mono
-    }
-  }
-  nginx -> svc.entrypoints.bs_handler: "/webhooks/banksync" {
-    style: {
-      opacity: 0.75
-      stroke-dash: 4
       font-color: "#EEF1F8"
       font: mono
     }
@@ -297,26 +231,10 @@ up -> vps.nginx: TRANSACTION_SETTLED\n(signed POST) {
     font: mono
   }
 }
-banksync -> vps.nginx: CommBank txns (POST) {
-  style: {
-    opacity: 0.75
-    stroke-dash: 4
-    font-color: "#EEF1F8"
-    font: mono
-  }
-}
-
 # Data path (pull + write)
 vps.svc.entrypoints.poller -> up: "GET /transactions\n(filter[since])" {
   style: {
     stroke: "#FFEF6B"
-    font-color: "#EEF1F8"
-    font: mono
-  }
-}
-vps.svc.entrypoints.backfill -> banksync: "GET /transactions?from&to" {
-  style: {
-    stroke: "#9499AB"
     font-color: "#EEF1F8"
     font: mono
   }
