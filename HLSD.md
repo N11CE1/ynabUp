@@ -173,12 +173,11 @@ discipline issue, not a bug — see the explicit warning in
 Single Docker container (multi-stage build, `golang:1.26-alpine` →
 `alpine:latest`, no CGO via `modernc.org/sqlite`), `docker-compose.yml` with
 an `env_file` for secrets and a named volume for the SQLite state file.
-Port bound to `127.0.0.1` only; nginx reverse-proxies
-`budget.lotsandlotsofsausages.info` (Let's Encrypt via Certbot) to the
-container, matching the existing pattern of other services on the same VPS.
-DNS is Cloudflare, deliberately DNS-only (grey cloud, not proxied) rather
-than orange-clouded, since there's no need for Cloudflare's edge in front of
-a single-user webhook endpoint.
+Port bound to `127.0.0.1` only; nginx reverse-proxies the service's domain
+(Let's Encrypt via Certbot) to the container, matching the existing pattern
+of other services on the same VPS. DNS is deliberately not proxied through
+any CDN/edge network, since there's no need for that in front of a
+single-user webhook endpoint.
 
 ## Known gaps / deferred work
 
