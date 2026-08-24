@@ -44,10 +44,13 @@ func VerifySignature(payload []byte, signatureHeader, secret string) bool {
 	return hmac.Equal(expected, got)
 }
 
-// Handler verifies and processes a single Up webhook event. Only
-// TRANSACTION_CREATED and TRANSACTION_SETTLED events carry a transaction to
-// sync; everything else (e.g. PING, TRANSACTION_DELETED) is acknowledged
-// and ignored.
+// Handler verifies and processes a single Up webhook event.
+// TRANSACTION_CREATED and TRANSACTION_SETTLED carry a transaction to sync;
+// TRANSACTION_DELETED retracts it from YNAB if we'd already synced it -
+// Up sends this when e.g. an authorization hold (posted with a placeholder
+// amount) is released in favour of a separate, later transaction carrying
+// the real settled amount, rather than the hold itself updating in place.
+// Everything else (e.g. PING) is acknowledged and ignored.
 func Handler(db *sql.DB, cfg pipeline.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -70,8 +73,27 @@ func Handler(db *sql.DB, cfg pipeline.Config) http.HandlerFunc {
 		eventType := event.Data.Attributes.EventType
 		txnRef := event.Data.Relationships.Transaction.Data
 
-		if txnRef == nil || (eventType != "TRANSACTION_CREATED" && eventType != "TRANSACTION_SETTLED") {
+		if txnRef == nil || (eventType != "TRANSACTION_CREATED" && eventType != "TRANSACTION_SETTLED" && eventType != "TRANSACTION_DELETED") {
 			log.Printf("ignoring webhook event: %s", eventType)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		if eventType == "TRANSACTION_DELETED" {
+			deleted, hadRecord, err := pipeline.DeleteSyncedUpTransaction(db, txnRef.ID, cfg)
+			if err != nil {
+				log.Printf("failed to delete synced transaction %s: %v", txnRef.ID, err)
+				http.Error(w, "failed to delete synced transaction", http.StatusInternalServerError)
+				return
+			}
+			switch {
+			case deleted:
+				log.Printf("retracted transaction %s from YNAB (deleted at source)", txnRef.ID)
+			case hadRecord:
+				log.Printf("transaction %s was deleted at source but has no known YNAB id (synced before delete-tracking, or via duplicate reconciliation) - needs manual cleanup", txnRef.ID)
+			default:
+				log.Printf("transaction %s was deleted at source but was never synced, nothing to do", txnRef.ID)
+			}
 			w.WriteHeader(http.StatusOK)
 			return
 		}

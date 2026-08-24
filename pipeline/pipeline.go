@@ -60,20 +60,63 @@ func SyncTransaction(db *sql.DB, ynabTxn ynab.Transaction, cfg Config) (skipped 
 	}
 
 	wasDuplicate := false
-	if err := ynab.PostTransaction(ynabTxn, cfg.BudgetID, cfg.YnabToken); err != nil {
+	ynabTransactionID, err := ynab.PostTransaction(ynabTxn, cfg.BudgetID, cfg.YnabToken)
+	if err != nil {
 		if !errors.Is(err, ynab.ErrDuplicateTransaction) {
 			return false, fmt.Errorf("posting to YNAB: %w", err)
 		}
 		// Already in YNAB from before local state tracking existed (or a
 		// prior run's markSynced failed) - reconcile rather than retry forever.
+		// YNAB's 409 doesn't disclose the existing transaction's ID, so this
+		// record won't be deletable later if Up reports the source deleted.
 		wasDuplicate = true
 	}
 
-	if err := store.MarkSynced(db, ynabTxn.ImportID); err != nil {
+	if err := store.MarkSynced(db, ynabTxn.ImportID, ynabTransactionID); err != nil {
 		return false, fmt.Errorf("posted to YNAB but failed to record sync state: %w", err)
 	}
 
 	return wasDuplicate, nil
+}
+
+// DeleteSyncedUpTransaction retracts the YNAB transaction synced for upTxnID,
+// if any, and clears its local sync record - used when Up reports a
+// transaction as deleted (e.g. an authorization hold released in favour of a
+// separate settled transaction, common for merchants with delayed final
+// pricing like transit). Returns hadRecord=false if upTxnID was never
+// synced (nothing to do), and deleted=false with hadRecord=true if it was
+// synced before ynab_transaction_id was tracked, or via the duplicate-
+// reconciliation path - in that case the stale entry can't be identified
+// well enough to delete automatically and needs manual cleanup, same as
+// before this function existed.
+func DeleteSyncedUpTransaction(db *sql.DB, upTxnID string, cfg Config) (deleted, hadRecord bool, err error) {
+	importID := ynab.SafeImportID(upTxnID)
+
+	synced, err := store.IsSynced(db, importID)
+	if err != nil {
+		return false, false, fmt.Errorf("checking sync state: %w", err)
+	}
+	if !synced {
+		return false, false, nil
+	}
+
+	ynabTransactionID, hasID, err := store.YnabTransactionID(db, importID)
+	if err != nil {
+		return false, true, fmt.Errorf("looking up YNAB transaction id: %w", err)
+	}
+	if !hasID {
+		return false, true, nil
+	}
+
+	if err := ynab.DeleteTransaction(cfg.BudgetID, ynabTransactionID, cfg.YnabToken); err != nil {
+		return false, true, fmt.Errorf("deleting from YNAB: %w", err)
+	}
+
+	if err := store.DeleteSynced(db, importID); err != nil {
+		return false, true, fmt.Errorf("deleted from YNAB but failed to clear local sync state: %w", err)
+	}
+
+	return true, true, nil
 }
 
 // SyncUpTransaction resolves which mapped Up account a transaction belongs
@@ -144,7 +187,9 @@ func suppressAsHandled(db *sql.DB, upTxnID string) (skipped bool, err error) {
 		return false, fmt.Errorf("checking sync state: %w", err)
 	}
 	if !alreadySynced {
-		if err := store.MarkSynced(db, importID); err != nil {
+		// No corresponding YNAB post for the suppressed inflow side, so
+		// there's no YNAB transaction ID to record.
+		if err := store.MarkSynced(db, importID, ""); err != nil {
 			return false, fmt.Errorf("recording transfer inflow as handled: %w", err)
 		}
 	}

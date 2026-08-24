@@ -54,6 +54,14 @@ type transactionRequest struct {
 	Transaction Transaction `json:"transaction"`
 }
 
+type postTransactionResponse struct {
+	Data struct {
+		Transaction struct {
+			ID string `json:"id"`
+		} `json:"transaction"`
+	} `json:"data"`
+}
+
 type Account struct {
 	ID string `json:"id"`
 	// TransferPayeeID is the special payee that, when set as a
@@ -209,14 +217,18 @@ func Transform(txn up.Transaction, accountID string) Transaction {
 const maxRateLimitRetries = 5
 
 // PostTransaction sends a single transformed transaction to YNAB's API,
-// retrying with exponential backoff if rate-limited. YNAB doesn't send a
+// retrying with exponential backoff if rate-limited, and returns YNAB's own
+// ID for the created transaction (needed later to delete it, since YNAB's
+// delete endpoint is keyed by its ID, not import_id). YNAB doesn't send a
 // Retry-After header, so this only smooths over short bursts - if the
 // hourly quota is genuinely exhausted, it gives up and returns an error;
 // callers can safely retry later since posting is idempotent on import_id.
-func PostTransaction(txn Transaction, budgetID, token string) error {
+// On ErrDuplicateTransaction the returned ID is empty, since YNAB's 409
+// response doesn't disclose the existing transaction's ID.
+func PostTransaction(txn Transaction, budgetID, token string) (ynabTransactionID string, err error) {
 	body, err := json.Marshal(transactionRequest{Transaction: txn})
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	url := fmt.Sprintf("%s/budgets/%s/transactions", APIBaseURL, budgetID)
@@ -225,7 +237,7 @@ func PostTransaction(txn Transaction, budgetID, token string) error {
 	for attempt := 1; attempt <= maxRateLimitRetries; attempt++ {
 		req, err := http.NewRequest("POST", url, bytes.NewReader(body))
 		if err != nil {
-			return err
+			return "", err
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
@@ -233,13 +245,13 @@ func PostTransaction(txn Transaction, budgetID, token string) error {
 		client := &http.Client{}
 		resp, err := client.Do(req)
 		if err != nil {
-			return err
+			return "", err
 		}
 
 		if resp.StatusCode == http.StatusTooManyRequests {
 			resp.Body.Close()
 			if attempt == maxRateLimitRetries {
-				return fmt.Errorf("rate limited after %d attempts", maxRateLimitRetries)
+				return "", fmt.Errorf("rate limited after %d attempts", maxRateLimitRetries)
 			}
 			time.Sleep(backoff)
 			backoff *= 2
@@ -248,18 +260,57 @@ func PostTransaction(txn Transaction, budgetID, token string) error {
 
 		if resp.StatusCode == http.StatusConflict {
 			resp.Body.Close()
-			return ErrDuplicateTransaction
+			return "", ErrDuplicateTransaction
 		}
 
 		if resp.StatusCode != http.StatusCreated {
 			respBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			return fmt.Errorf("unexpected status: %s: %s", resp.Status, respBody)
+			return "", fmt.Errorf("unexpected status: %s: %s", resp.Status, respBody)
 		}
 
+		var result postTransactionResponse
+		err = json.NewDecoder(resp.Body).Decode(&result)
 		resp.Body.Close()
+		if err != nil {
+			return "", fmt.Errorf("decoding created transaction: %w", err)
+		}
+
+		return result.Data.Transaction.ID, nil
+	}
+
+	return "", fmt.Errorf("rate limited after %d attempts", maxRateLimitRetries)
+}
+
+// DeleteTransaction removes a transaction from YNAB by its own ID (not
+// import_id - the delete endpoint doesn't support that). Used when Up
+// reports a transaction as deleted (e.g. a released authorization hold
+// replaced by a separate settled transaction) and we'd already synced it.
+// A 404 (already gone, e.g. deleted by hand or by a prior retry) is treated
+// as success rather than an error, since the end state is what we wanted.
+func DeleteTransaction(budgetID, transactionID, token string) error {
+	url := fmt.Sprintf("%s/budgets/%s/transactions/%s", APIBaseURL, budgetID, transactionID)
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
 		return nil
 	}
 
-	return fmt.Errorf("rate limited after %d attempts", maxRateLimitRetries)
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unexpected status: %s: %s", resp.Status, respBody)
+	}
+
+	return nil
 }

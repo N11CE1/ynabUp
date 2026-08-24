@@ -98,7 +98,7 @@ vps: VPS {
           shadow: true
           border-radius: 8
         }
-        tooltip: Verifies X-Up-Authenticity-Signature (HMAC-SHA256), fetches the single referenced txn by ID
+        tooltip: Verifies X-Up-Authenticity-Signature (HMAC-SHA256); CREATED/SETTLED fetch and sync the txn by ID, DELETED retracts the matching YNAB txn if one was synced
       }
       poller: "Up one-shot\nsync" {
         style: {
@@ -161,7 +161,7 @@ vps: VPS {
           shadow: true
           border-radius: 8
         }
-        tooltip: import_id = source txn ID (hashed if over 36 chars), idempotent, retries on rate limit
+        tooltip: import_id = source txn ID (hashed if over 36 chars), idempotent, retries on rate limit; also records YNAB's own txn ID so it can be deleted later if the source txn is
       }
       db: "SQLite\nstate" {
         shape: cylinder

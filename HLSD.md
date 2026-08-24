@@ -45,10 +45,12 @@ place regardless of how a transaction was discovered.
 
 ## Data flow
 
-**Fast path (Up only):** Up POSTs a signed `TRANSACTION_SETTLED` webhook to
-`/webhooks/up` → handler verifies `X-Up-Authenticity-Signature`
-(HMAC-SHA256) → fetches the single referenced transaction by ID → runs it
-through the pipeline.
+**Fast path (Up only):** Up POSTs a signed webhook to `/webhooks/up` →
+handler verifies `X-Up-Authenticity-Signature` (HMAC-SHA256). For
+`TRANSACTION_CREATED`/`TRANSACTION_SETTLED`, it fetches the single
+referenced transaction by ID and runs it through the pipeline. For
+`TRANSACTION_DELETED`, it retracts the corresponding YNAB transaction
+instead (see Errors and lessons learned below for why this matters).
 
 **Reconciliation path (in-process cron):** a background goroutine started by
 `-serve` runs immediately on startup and then every `CRON_INTERVAL` (default
@@ -107,6 +109,15 @@ because:
   source IDs are hashed via `ynab.SafeImportID` rather than truncated, to
   avoid silent collisions between two different transactions that happen to
   share a truncated prefix.
+
+Alongside `import_id`, the store also records YNAB's own transaction ID for
+each post (`ynab_transaction_id`) — a separate identifier, needed because
+YNAB's delete endpoint is keyed by its own ID, not `import_id`. This is what
+lets a `TRANSACTION_DELETED` webhook retract the right YNAB transaction.
+It's unknown (stored as empty) for transactions synced via the duplicate-
+reconciliation path, since YNAB's 409 response on a duplicate `import_id`
+doesn't disclose the existing transaction's ID — those can't be
+auto-deleted if Up later reports them deleted.
 
 `RunOneShotSync`'s watermark (`up_last_synced_at` in the `settings` table)
 only advances when a run has **zero** failures, so a partial failure
@@ -167,6 +178,23 @@ the same accounts. There is no code-level guard against this (two processes
 pointed at the same `.env` will both happily sync); it's a deployment
 discipline issue, not a bug — see the explicit warning in
 [TODO.md](TODO.md).
+
+**Some merchants release an authorization hold rather than settling it in
+place.** The general Up API pattern is that a `HELD` transaction settles by
+updating in place (same `id`, `amount` changes from the hold value to the
+final value) — but Transport for NSW's transit tap-on/tap-off doesn't follow
+that pattern. It posts a placeholder hold (e.g. $1), then later *deletes*
+that transaction and posts the real fare as a separate transaction once the
+fare is calculated. The webhook handler originally treated
+`TRANSACTION_DELETED` purely as a no-op (like `PING`), so the placeholder
+stayed in YNAB permanently while the real fare synced in as an unrelated
+second entry — surfaced as a recurring manual cleanup chore before being
+diagnosed via Up's own transaction history (confirming no stale holds exist
+on Up's side; the duplication was solely a YNAB-side artifact of ignoring
+the delete event). Fixed by tracking YNAB's own transaction ID per sync
+(`ynab_transaction_id`, alongside `import_id`) and handling
+`TRANSACTION_DELETED` by retracting the corresponding YNAB transaction, if
+one was recorded.
 
 ## Deployment
 

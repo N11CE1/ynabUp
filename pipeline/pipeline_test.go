@@ -45,6 +45,13 @@ type fakeYNAB struct {
 	requests           []recordedRequest
 }
 
+// fakeTransactionID deterministically derives a YNAB transaction ID from an
+// import_id, so tests can assert DeleteTransaction was called with the
+// right ID without needing to inspect fakeYNAB's internal state.
+func fakeTransactionID(importID string) string {
+	return "ynab-" + importID
+}
+
 func newFakeYNAB(t *testing.T) *fakeYNAB {
 	t.Helper()
 	f := &fakeYNAB{t: t, duplicateImportIDs: map[string]bool{}, failImportIDs: map[string]bool{}}
@@ -83,6 +90,14 @@ func (f *fakeYNAB) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"transaction": map[string]any{"id": fakeTransactionID(importID)},
+			},
+		})
+
+	case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/transactions/"):
+		w.WriteHeader(http.StatusOK)
 
 	case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/categories/"):
 		json.NewEncoder(w).Encode(map[string]any{
@@ -116,6 +131,18 @@ func (f *fakeYNAB) postCount() int {
 	return n
 }
 
+// deletedTransactionPaths returns the URL path of every DELETE request the
+// fake YNAB server received, in order.
+func (f *fakeYNAB) deletedTransactionPaths() []string {
+	var paths []string
+	for _, r := range f.requests {
+		if r.Method == http.MethodDelete {
+			paths = append(paths, r.Path)
+		}
+	}
+	return paths
+}
+
 func baseCfg() Config {
 	return Config{BudgetID: "budget1", YnabToken: "token"}
 }
@@ -143,13 +170,21 @@ func TestSyncTransaction_PostsAndMarksSynced(t *testing.T) {
 	if !synced {
 		t.Fatal("expected transaction to be recorded as synced")
 	}
+
+	ynabID, hasID, err := store.YnabTransactionID(db, "txn-1")
+	if err != nil {
+		t.Fatalf("YnabTransactionID: %v", err)
+	}
+	if !hasID || ynabID != fakeTransactionID("txn-1") {
+		t.Fatalf("expected the YNAB transaction id from the post response to be recorded, got %q (hasID=%v)", ynabID, hasID)
+	}
 }
 
 func TestSyncTransaction_AlreadySyncedSkipsWithoutPosting(t *testing.T) {
 	db := testDB(t)
 	f := newFakeYNAB(t)
 
-	if err := store.MarkSynced(db, "txn-1"); err != nil {
+	if err := store.MarkSynced(db, "txn-1", "ynab-txn-1"); err != nil {
 		t.Fatalf("MarkSynced: %v", err)
 	}
 
@@ -397,5 +432,94 @@ func TestSyncUpTransaction_UnrecognisedTransferShapeFallsBackToNormalPost(t *tes
 	body := f.requests[0].Body["transaction"].(map[string]any)
 	if body["payee_id"] != nil && body["payee_id"] != "" {
 		t.Fatalf("expected a normal unlinked post, got payee_id=%v", body["payee_id"])
+	}
+}
+
+// TestDeleteSyncedUpTransaction_RetractsFromYNAB guards against the exact
+// regression that motivated this function: Up releasing a placeholder
+// authorization hold (e.g. a $1 transit tap-on) in favour of a separate,
+// later transaction for the real settled amount, rather than the hold
+// updating in place. Up reports the hold as TRANSACTION_DELETED, and
+// without this, the placeholder would sit in YNAB forever alongside the
+// real transaction.
+func TestDeleteSyncedUpTransaction_RetractsFromYNAB(t *testing.T) {
+	db := testDB(t)
+	f := newFakeYNAB(t)
+
+	txn := ynab.Transaction{AccountID: "acct1", ImportID: "up-txn-1", Amount: -1000, PayeeName: "Transport for NSW"}
+	if _, err := SyncTransaction(db, txn, baseCfg()); err != nil {
+		t.Fatalf("SyncTransaction: %v", err)
+	}
+
+	deleted, hadRecord, err := DeleteSyncedUpTransaction(db, "up-txn-1", baseCfg())
+	if err != nil {
+		t.Fatalf("DeleteSyncedUpTransaction: %v", err)
+	}
+	if !deleted || !hadRecord {
+		t.Fatalf("expected deleted=true, hadRecord=true, got deleted=%v hadRecord=%v", deleted, hadRecord)
+	}
+
+	wantPath := "/budgets/budget1/transactions/" + fakeTransactionID("up-txn-1")
+	paths := f.deletedTransactionPaths()
+	if len(paths) != 1 || paths[0] != wantPath {
+		t.Fatalf("expected a single DELETE to %s, got %v", wantPath, paths)
+	}
+
+	synced, err := store.IsSynced(db, "up-txn-1")
+	if err != nil {
+		t.Fatalf("IsSynced: %v", err)
+	}
+	if synced {
+		t.Fatal("expected the local sync record to be cleared after deletion")
+	}
+}
+
+func TestDeleteSyncedUpTransaction_NeverSyncedIsNoOp(t *testing.T) {
+	db := testDB(t)
+	f := newFakeYNAB(t)
+
+	deleted, hadRecord, err := DeleteSyncedUpTransaction(db, "never-synced", baseCfg())
+	if err != nil {
+		t.Fatalf("DeleteSyncedUpTransaction: %v", err)
+	}
+	if deleted || hadRecord {
+		t.Fatalf("expected deleted=false, hadRecord=false for a never-synced transaction, got deleted=%v hadRecord=%v", deleted, hadRecord)
+	}
+	if len(f.requests) != 0 {
+		t.Fatalf("expected no requests to YNAB, got %+v", f.requests)
+	}
+}
+
+// TestDeleteSyncedUpTransaction_NoKnownYnabIDLeavesRecord covers records
+// synced before ynab_transaction_id was tracked, or via the duplicate-
+// reconciliation path (YNAB's 409 doesn't disclose the existing
+// transaction's ID) - these can't be auto-deleted and are left for manual
+// cleanup, matching the pre-existing behaviour for that case.
+func TestDeleteSyncedUpTransaction_NoKnownYnabIDLeavesRecord(t *testing.T) {
+	db := testDB(t)
+	f := newFakeYNAB(t)
+
+	importID := ynab.SafeImportID("up-txn-legacy")
+	if err := store.MarkSynced(db, importID, ""); err != nil {
+		t.Fatalf("MarkSynced: %v", err)
+	}
+
+	deleted, hadRecord, err := DeleteSyncedUpTransaction(db, "up-txn-legacy", baseCfg())
+	if err != nil {
+		t.Fatalf("DeleteSyncedUpTransaction: %v", err)
+	}
+	if deleted || !hadRecord {
+		t.Fatalf("expected deleted=false, hadRecord=true, got deleted=%v hadRecord=%v", deleted, hadRecord)
+	}
+	if len(f.requests) != 0 {
+		t.Fatalf("expected no requests to YNAB when no YNAB id is known, got %+v", f.requests)
+	}
+
+	synced, err := store.IsSynced(db, importID)
+	if err != nil {
+		t.Fatalf("IsSynced: %v", err)
+	}
+	if !synced {
+		t.Fatal("expected the local record to remain (needs manual cleanup) since it couldn't be auto-deleted")
 	}
 }
