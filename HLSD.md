@@ -196,6 +196,24 @@ the delete event). Fixed by tracking YNAB's own transaction ID per sync
 `TRANSACTION_DELETED` by retracting the corresponding YNAB transaction, if
 one was recorded.
 
+**YNAB blocks reuse of an `import_id` permanently, even after the
+transaction using it is deleted.** Found while testing a new account
+mapping: a transfer had already synced once under the old (pre-mapping)
+fallback behavior as a plain unlinked transaction. Deleting that wrong
+transaction in the YNAB app and clearing its local sync-state row, expecting
+reconciliation to repost it correctly as a real linked transfer, silently
+failed — YNAB returned 409 Conflict on the repost, which the pipeline
+correctly treats as "already handled" (see Sync-state and idempotency
+above) and marked synced without creating anything. Net effect: the
+transaction vanished from YNAB entirely, not just from its wrong location.
+The delete-and-resync repair pattern only works for a transaction that was
+*never* successfully posted; for one that's been posted and then deleted,
+the `import_id` stays permanently consumed, and the only fix is a fresh
+manual entry in the YNAB app (a new transaction has no `import_id` to
+collide with). This doesn't affect any transaction synced under a
+never-before-used source ID — i.e. every future sync is unaffected — it's
+only a trap when manually correcting something already synced once.
+
 ## Deployment
 
 Single Docker container (multi-stage build, `golang:1.26-alpine` →
