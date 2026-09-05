@@ -282,6 +282,49 @@ func PostTransaction(txn Transaction, budgetID, token string) (ynabTransactionID
 	return "", fmt.Errorf("rate limited after %d attempts", maxRateLimitRetries)
 }
 
+type clearedUpdateRequest struct {
+	Transaction struct {
+		Cleared string `json:"cleared"`
+	} `json:"transaction"`
+}
+
+// UpdateTransactionCleared sets a transaction's cleared status by its own ID
+// (not import_id). Used when Up reports a transaction settling after it was
+// already synced as uncleared - posting only happens once per import_id, so
+// a later status change has to be applied as an update to the existing YNAB
+// transaction rather than a new post.
+func UpdateTransactionCleared(budgetID, transactionID, cleared, token string) error {
+	var update clearedUpdateRequest
+	update.Transaction.Cleared = cleared
+
+	body, err := json.Marshal(update)
+	if err != nil {
+		return err
+	}
+
+	url := fmt.Sprintf("%s/budgets/%s/transactions/%s", APIBaseURL, budgetID, transactionID)
+	req, err := http.NewRequest("PATCH", url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unexpected status: %s: %s", resp.Status, respBody)
+	}
+
+	return nil
+}
+
 // DeleteTransaction removes a transaction from YNAB by its own ID (not
 // import_id - the delete endpoint doesn't support that). Used when Up
 // reports a transaction as deleted (e.g. a released authorization hold

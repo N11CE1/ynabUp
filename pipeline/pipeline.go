@@ -50,12 +50,21 @@ type Config struct {
 // if not, posts it to YNAB and records it as synced. Callers transform their
 // source-specific transaction into ynab.Transaction first, so this is shared
 // by the one-shot batch sync and the Up webhook.
+//
+// A transaction only ever gets posted once per import_id - if it's already
+// synced but now reports as cleared (e.g. Up settling a transaction that was
+// posted while still HELD), the existing YNAB transaction is updated in
+// place rather than reprocessed, since IsSynced would otherwise skip it
+// silently forever and the cleared status would never catch up.
 func SyncTransaction(db *sql.DB, ynabTxn ynab.Transaction, cfg Config) (skipped bool, err error) {
 	alreadySynced, err := store.IsSynced(db, ynabTxn.ImportID)
 	if err != nil {
 		return false, fmt.Errorf("checking sync state: %w", err)
 	}
 	if alreadySynced {
+		if ynabTxn.Cleared == "cleared" {
+			updateClearedStatus(db, ynabTxn.ImportID, cfg)
+		}
 		return true, nil
 	}
 
@@ -77,6 +86,28 @@ func SyncTransaction(db *sql.DB, ynabTxn ynab.Transaction, cfg Config) (skipped 
 	}
 
 	return wasDuplicate, nil
+}
+
+// updateClearedStatus marks the YNAB transaction recorded for importID as
+// cleared. Best-effort: this runs as a side effect of an already-synced
+// transaction, so a problem here is logged rather than failing the caller.
+// A missing YNAB transaction ID (synced before ynab_transaction_id was
+// tracked, or via the duplicate-reconciliation path, which never learns
+// YNAB's ID for the existing transaction) is a benign dead end, same as in
+// DeleteSyncedUpTransaction below.
+func updateClearedStatus(db *sql.DB, importID string, cfg Config) {
+	ynabTransactionID, hasID, err := store.YnabTransactionID(db, importID)
+	if err != nil {
+		log.Printf("failed to look up YNAB transaction id for %s: %v", importID, err)
+		return
+	}
+	if !hasID {
+		return
+	}
+
+	if err := ynab.UpdateTransactionCleared(cfg.BudgetID, ynabTransactionID, "cleared", cfg.YnabToken); err != nil {
+		log.Printf("failed to mark transaction %s cleared in YNAB: %v", importID, err)
+	}
 }
 
 // DeleteSyncedUpTransaction retracts the YNAB transaction synced for upTxnID,

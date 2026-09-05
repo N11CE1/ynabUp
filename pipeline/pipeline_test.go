@@ -99,6 +99,9 @@ func (f *fakeYNAB) handle(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/transactions/"):
 		w.WriteHeader(http.StatusOK)
 
+	case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/transactions/"):
+		w.WriteHeader(http.StatusOK)
+
 	case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/categories/"):
 		json.NewEncoder(w).Encode(map[string]any{
 			"data": map[string]any{
@@ -137,6 +140,19 @@ func (f *fakeYNAB) deletedTransactionPaths() []string {
 	var paths []string
 	for _, r := range f.requests {
 		if r.Method == http.MethodDelete {
+			paths = append(paths, r.Path)
+		}
+	}
+	return paths
+}
+
+// patchedTransactionPaths returns the URL path of every PATCH request against
+// a /transactions/ endpoint the fake YNAB server received, in order -
+// distinct from category PATCHes, which hit a different path.
+func (f *fakeYNAB) patchedTransactionPaths() []string {
+	var paths []string
+	for _, r := range f.requests {
+		if r.Method == http.MethodPatch && strings.Contains(r.Path, "/transactions/") {
 			paths = append(paths, r.Path)
 		}
 	}
@@ -198,6 +214,57 @@ func TestSyncTransaction_AlreadySyncedSkipsWithoutPosting(t *testing.T) {
 	}
 	if f.postCount() != 0 {
 		t.Fatalf("expected no POST to YNAB for an already-synced transaction, got %d", f.postCount())
+	}
+}
+
+func TestSyncTransaction_AlreadySyncedButNowClearedUpdatesYNAB(t *testing.T) {
+	db := testDB(t)
+	f := newFakeYNAB(t)
+
+	if err := store.MarkSynced(db, "txn-1", "ynab-txn-1"); err != nil {
+		t.Fatalf("MarkSynced: %v", err)
+	}
+
+	// Simulates Up settling a transaction that was originally synced while
+	// still HELD/uncleared - same import_id, now reporting cleared.
+	txn := ynab.Transaction{AccountID: "acct1", ImportID: "txn-1", Cleared: "cleared"}
+	skipped, err := SyncTransaction(db, txn, baseCfg())
+	if err != nil {
+		t.Fatalf("SyncTransaction: %v", err)
+	}
+	if !skipped {
+		t.Fatal("expected skipped=true for an already-synced transaction")
+	}
+	if f.postCount() != 0 {
+		t.Fatalf("expected no POST to YNAB for an already-synced transaction, got %d", f.postCount())
+	}
+
+	paths := f.patchedTransactionPaths()
+	if len(paths) != 1 || !strings.HasSuffix(paths[0], "/transactions/ynab-txn-1") {
+		t.Fatalf("expected exactly one PATCH to /transactions/ynab-txn-1, got %v", paths)
+	}
+}
+
+func TestSyncTransaction_AlreadySyncedWithNoKnownYNABIDSkipsClearedUpdate(t *testing.T) {
+	db := testDB(t)
+	f := newFakeYNAB(t)
+
+	// Simulates a transaction synced via the duplicate-reconciliation path,
+	// which never learns YNAB's own ID for the existing transaction.
+	if err := store.MarkSynced(db, "txn-1", ""); err != nil {
+		t.Fatalf("MarkSynced: %v", err)
+	}
+
+	txn := ynab.Transaction{AccountID: "acct1", ImportID: "txn-1", Cleared: "cleared"}
+	skipped, err := SyncTransaction(db, txn, baseCfg())
+	if err != nil {
+		t.Fatalf("SyncTransaction: %v", err)
+	}
+	if !skipped {
+		t.Fatal("expected skipped=true for an already-synced transaction")
+	}
+	if len(f.patchedTransactionPaths()) != 0 {
+		t.Fatal("expected no PATCH attempt when no YNAB transaction id is known")
 	}
 }
 
