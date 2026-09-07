@@ -36,6 +36,53 @@ var APIBaseURL = "https://api.ynab.com/v1"
 // import_id on the account, e.g. from a sync predating local state tracking.
 var ErrDuplicateTransaction = errors.New("transaction already exists in YNAB")
 
+// httpClient is shared across every request in this package: a bare
+// &http.Client{} has no timeout, so a stalled connection to YNAB would
+// otherwise hang the sync indefinitely with no recovery path - fatal for a
+// service that runs unattended in a cron loop. Sharing one client also
+// reuses connections instead of dialing fresh for every call.
+var httpClient = &http.Client{Timeout: 30 * time.Second}
+
+const maxRateLimitRetries = 5
+
+// doWithRetry sends req, retrying with exponential backoff on a 429
+// response. YNAB doesn't send a Retry-After header, so this only smooths
+// over short bursts - if the hourly quota is genuinely exhausted, it gives
+// up and returns an error. req.GetBody is used to re-read the body on a
+// retry (set automatically by http.NewRequest for a *bytes.Reader body, as
+// every POST/PATCH in this package uses); GET/DELETE requests have a nil
+// body and don't need it.
+func doWithRetry(req *http.Request) (*http.Response, error) {
+	backoff := 2 * time.Second
+	for attempt := 1; attempt <= maxRateLimitRetries; attempt++ {
+		if attempt > 1 && req.GetBody != nil {
+			body, err := req.GetBody()
+			if err != nil {
+				return nil, fmt.Errorf("rewinding request body for retry: %w", err)
+			}
+			req.Body = body
+		}
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		if resp.StatusCode != http.StatusTooManyRequests {
+			return resp, nil
+		}
+
+		resp.Body.Close()
+		if attempt == maxRateLimitRetries {
+			break
+		}
+		time.Sleep(backoff)
+		backoff *= 2
+	}
+
+	return nil, fmt.Errorf("rate limited after %d attempts", maxRateLimitRetries)
+}
+
 type Transaction struct {
 	AccountID string `json:"account_id"`
 	Date      string `json:"date"`
@@ -86,8 +133,7 @@ func FetchAccounts(budgetID, token string) ([]Account, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := doWithRetry(req)
 	if err != nil {
 		return nil, err
 	}
@@ -132,8 +178,7 @@ func GetCategory(budgetID, categoryID, token string) (Category, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := doWithRetry(req)
 	if err != nil {
 		return Category{}, err
 	}
@@ -180,8 +225,7 @@ func FundCategory(budgetID, categoryID string, deltaMilliunits int64, token stri
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := doWithRetry(req)
 	if err != nil {
 		return err
 	}
@@ -214,8 +258,6 @@ func Transform(txn up.Transaction, accountID string) Transaction {
 	}
 }
 
-const maxRateLimitRetries = 5
-
 // PostTransaction sends a single transformed transaction to YNAB's API,
 // retrying with exponential backoff if rate-limited, and returns YNAB's own
 // ID for the created transaction (needed later to delete it, since YNAB's
@@ -232,54 +274,34 @@ func PostTransaction(txn Transaction, budgetID, token string) (ynabTransactionID
 	}
 
 	url := fmt.Sprintf("%s/budgets/%s/transactions", APIBaseURL, budgetID)
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
 
-	backoff := 2 * time.Second
-	for attempt := 1; attempt <= maxRateLimitRetries; attempt++ {
-		req, err := http.NewRequest("POST", url, bytes.NewReader(body))
-		if err != nil {
-			return "", err
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/json")
+	resp, err := doWithRetry(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
 
-		client := &http.Client{}
-		resp, err := client.Do(req)
-		if err != nil {
-			return "", err
-		}
-
-		if resp.StatusCode == http.StatusTooManyRequests {
-			resp.Body.Close()
-			if attempt == maxRateLimitRetries {
-				return "", fmt.Errorf("rate limited after %d attempts", maxRateLimitRetries)
-			}
-			time.Sleep(backoff)
-			backoff *= 2
-			continue
-		}
-
-		if resp.StatusCode == http.StatusConflict {
-			resp.Body.Close()
-			return "", ErrDuplicateTransaction
-		}
-
-		if resp.StatusCode != http.StatusCreated {
-			respBody, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			return "", fmt.Errorf("unexpected status: %s: %s", resp.Status, respBody)
-		}
-
-		var result postTransactionResponse
-		err = json.NewDecoder(resp.Body).Decode(&result)
-		resp.Body.Close()
-		if err != nil {
-			return "", fmt.Errorf("decoding created transaction: %w", err)
-		}
-
-		return result.Data.Transaction.ID, nil
+	if resp.StatusCode == http.StatusConflict {
+		return "", ErrDuplicateTransaction
 	}
 
-	return "", fmt.Errorf("rate limited after %d attempts", maxRateLimitRetries)
+	if resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("unexpected status: %s: %s", resp.Status, respBody)
+	}
+
+	var result postTransactionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decoding created transaction: %w", err)
+	}
+
+	return result.Data.Transaction.ID, nil
 }
 
 type clearedUpdateRequest struct {
@@ -310,8 +332,7 @@ func UpdateTransactionCleared(budgetID, transactionID, cleared, token string) er
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := doWithRetry(req)
 	if err != nil {
 		return err
 	}
@@ -339,8 +360,7 @@ func DeleteTransaction(budgetID, transactionID, token string) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := doWithRetry(req)
 	if err != nil {
 		return err
 	}

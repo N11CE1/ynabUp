@@ -8,7 +8,13 @@ import (
 	"time"
 )
 
-const APIBaseURL = "https://api.up.com.au/api/v1/transactions"
+// APIBaseURL is a var, not a const, so tests can point it at a fake server.
+var APIBaseURL = "https://api.up.com.au/api/v1/transactions"
+
+// httpClient is shared across every request in this package: a bare
+// &http.Client{} has no timeout, so a stalled connection to Up would
+// otherwise hang the sync indefinitely with no recovery path.
+var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 type TransactionResponse struct {
 	Data  []Transaction `json:"data"`
@@ -73,8 +79,7 @@ func FetchTransactions(token string, since *time.Time) ([]Transaction, error) {
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 
-		client := &http.Client{}
-		resp, err := client.Do(req)
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -113,8 +118,7 @@ func FetchTransactionByID(id, token string) (Transaction, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return Transaction{}, err
 	}

@@ -29,11 +29,34 @@ const (
 // webhook was missed.
 func runServer(db *sql.DB, cfg pipeline.Config, port string, cronInterval time.Duration) {
 	http.HandleFunc("/webhooks/up", webhook.Handler(db, cfg))
+	http.HandleFunc("/healthz", healthzHandler(db))
 
 	go runCronLoop(db, cfg, cronInterval)
 
 	log.Printf("listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
+}
+
+// healthzHandler reports whether the state DB is reachable and when the
+// last reconciliation pass completed successfully, so an external monitor
+// (or a Docker HEALTHCHECK) can tell the difference between "up" and
+// "up but silently failing every sync".
+func healthzHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := db.Ping(); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "error": "database unreachable"})
+			return
+		}
+
+		resp := map[string]any{"status": "ok"}
+		if lastSynced, has, err := pipeline.LastSyncedAt(db); err == nil && has {
+			resp["last_synced_at"] = lastSynced.Format(time.RFC3339)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
 }
 
 // runCronLoop runs a reconciliation pass immediately, then every interval
@@ -88,10 +111,10 @@ func parseAccountIDSet(envVar string) map[string]bool {
 
 // fetchYnabTransferPayeeIDs looks up each account's transfer payee ID, used
 // to post real linked transfers between two mapped accounts.
-func fetchYnabTransferPayeeIDs(budgetID, token string) map[string]string {
+func fetchYnabTransferPayeeIDs(budgetID, token string) (map[string]string, error) {
 	accounts, err := ynab.FetchAccounts(budgetID, token)
 	if err != nil {
-		log.Fatalf("failed to fetch YNAB accounts: %v", err)
+		return nil, err
 	}
 
 	ids := make(map[string]string, len(accounts))
@@ -99,7 +122,7 @@ func fetchYnabTransferPayeeIDs(budgetID, token string) map[string]string {
 		ids[a.ID] = a.TransferPayeeID
 	}
 
-	return ids
+	return ids, nil
 }
 
 func main() {
@@ -125,15 +148,24 @@ func main() {
 	ynabToken := os.Getenv("YNAB_API_TOKEN")
 
 	cfg := pipeline.Config{
-		UpToken:              os.Getenv("UP_API_TOKEN"),
-		UpWebhookSecret:      os.Getenv("UP_WEBHOOK_SECRET"),
-		UpAccountMap:         parseAccountMap("UP_ACCOUNT_MAP"),
-		YnabTransferPayeeIDs: fetchYnabTransferPayeeIDs(budgetID, ynabToken),
-		SavingsAccountIDs:    parseAccountIDSet("YNAB_SAVINGS_ACCOUNT_IDS"),
-		SavingsCategoryID:    os.Getenv("YNAB_SAVINGS_CATEGORY_ID"),
-		BudgetID:             budgetID,
-		YnabToken:            ynabToken,
+		UpToken:           os.Getenv("UP_API_TOKEN"),
+		UpWebhookSecret:   os.Getenv("UP_WEBHOOK_SECRET"),
+		UpAccountMap:      parseAccountMap("UP_ACCOUNT_MAP"),
+		SavingsAccountIDs: parseAccountIDSet("YNAB_SAVINGS_ACCOUNT_IDS"),
+		SavingsCategoryID: os.Getenv("YNAB_SAVINGS_CATEGORY_ID"),
+		BudgetID:          budgetID,
+		YnabToken:         ynabToken,
 	}
+
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("invalid configuration: %v", err)
+	}
+
+	transferPayeeIDs, err := fetchYnabTransferPayeeIDs(budgetID, ynabToken)
+	if err != nil {
+		log.Fatalf("failed to fetch YNAB accounts: %v", err)
+	}
+	cfg.YnabTransferPayeeIDs = transferPayeeIDs
 
 	if *serve {
 		port := os.Getenv("PORT")

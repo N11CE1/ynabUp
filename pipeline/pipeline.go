@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/N11CE1/ynabUp/store"
@@ -44,6 +45,32 @@ type Config struct {
 
 	BudgetID  string
 	YnabToken string
+}
+
+// Validate returns an error listing every missing required field, or nil if
+// the config is usable. Checked once at startup so a misconfigured
+// deployment fails fast with one clear message instead of an unrelated
+// downstream error - e.g. the YNAB accounts fetch failing on an empty
+// token, with nothing pointing back at the real cause.
+func (c Config) Validate() error {
+	var missing []string
+	if c.UpToken == "" {
+		missing = append(missing, "UP_API_TOKEN")
+	}
+	if c.BudgetID == "" {
+		missing = append(missing, "YNAB_BUDGET_ID")
+	}
+	if c.YnabToken == "" {
+		missing = append(missing, "YNAB_API_TOKEN")
+	}
+	if len(c.UpAccountMap) == 0 {
+		missing = append(missing, "UP_ACCOUNT_MAP")
+	}
+
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required config: %s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 // SyncTransaction checks whether a transaction has already been synced, and
@@ -265,6 +292,23 @@ func postAsLinkedTransfer(db *sql.DB, txn up.Transaction, accountID, destination
 }
 
 const upWatermarkKey = "up_last_synced_at"
+
+// LastSyncedAt returns the time of the last reconciliation run that
+// completed with zero failures, and whether one has happened yet - exposed
+// for a health check endpoint to report on.
+func LastSyncedAt(db *sql.DB) (t time.Time, has bool, err error) {
+	watermark, has, err := store.GetSetting(db, upWatermarkKey)
+	if err != nil || !has {
+		return time.Time{}, false, err
+	}
+
+	t, err = time.Parse(time.RFC3339, watermark)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("parsing stored watermark %q: %w", watermark, err)
+	}
+
+	return t, true, nil
+}
 
 // RunOneShotSync fetches Up transactions since the last successful run (or
 // full history on the very first run) and syncs any that haven't already

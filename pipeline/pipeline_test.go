@@ -163,6 +163,43 @@ func baseCfg() Config {
 	return Config{BudgetID: "budget1", YnabToken: "token"}
 }
 
+func TestConfig_Validate_CompleteConfigPasses(t *testing.T) {
+	cfg := Config{
+		UpToken:      "up-token",
+		BudgetID:     "budget1",
+		YnabToken:    "ynab-token",
+		UpAccountMap: map[string]string{"up-acct": "ynab-acct"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected a complete config to validate, got: %v", err)
+	}
+}
+
+func TestConfig_Validate_ReportsEveryMissingField(t *testing.T) {
+	err := Config{}.Validate()
+	if err == nil {
+		t.Fatal("expected an empty config to fail validation")
+	}
+
+	for _, want := range []string{"UP_API_TOKEN", "YNAB_BUDGET_ID", "YNAB_API_TOKEN", "UP_ACCOUNT_MAP"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("expected validation error to mention %s, got: %v", want, err)
+		}
+	}
+}
+
+func TestConfig_Validate_EmptyAccountMapFails(t *testing.T) {
+	cfg := Config{
+		UpToken:      "up-token",
+		BudgetID:     "budget1",
+		YnabToken:    "ynab-token",
+		UpAccountMap: map[string]string{},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected an empty (non-nil) UpAccountMap to still fail validation")
+	}
+}
+
 func TestSyncTransaction_PostsAndMarksSynced(t *testing.T) {
 	db := testDB(t)
 	f := newFakeYNAB(t)

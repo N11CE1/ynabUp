@@ -51,9 +51,14 @@ func VerifySignature(payload []byte, signatureHeader, secret string) bool {
 // amount) is released in favour of a separate, later transaction carrying
 // the real settled amount, rather than the hold itself updating in place.
 // Everything else (e.g. PING) is acknowledged and ignored.
+// maxWebhookBodyBytes caps how much of a request body gets read - Up's
+// webhook payloads are a small fixed shape, so anything near this size is
+// either a misbehaving sender or abuse, not a legitimate delivery.
+const maxWebhookBodyBytes = 1 << 20 // 1MB
+
 func Handler(db *sql.DB, cfg pipeline.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBodyBytes))
 		if err != nil {
 			http.Error(w, "failed to read body", http.StatusBadRequest)
 			return

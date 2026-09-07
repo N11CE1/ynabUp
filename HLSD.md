@@ -43,6 +43,10 @@ Every entry point (webhook, one-shot poll) converges on
 `pipeline.SyncTransaction`, so dedup and posting logic exists in exactly one
 place regardless of how a transaction was discovered.
 
+Every package has test coverage (`go test ./...`) — pipeline's tests are the
+most substantial, since `SyncUpTransaction`'s transfer-linking logic is
+where the real production bugs documented below actually lived.
+
 ## Data flow
 
 **Fast path (Up only):** Up POSTs a signed webhook to `/webhooks/up` →
@@ -224,6 +228,11 @@ Port bound to `127.0.0.1` only; nginx reverse-proxies the service's domain
 of other services on the same VPS. DNS is deliberately not proxied through
 any CDN/edge network, since there's no need for that in front of a
 single-user webhook endpoint.
+
+`/healthz` reports whether the state DB is reachable and the timestamp of
+the last reconciliation pass that completed with zero failures - the
+difference between "the process is up" and "the process is up but silently
+failing every sync" isn't visible from the outside otherwise.
 
 ## Known gaps / deferred work
 

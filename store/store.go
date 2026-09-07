@@ -57,6 +57,12 @@ func Open(path string) (*sql.DB, error) {
 // hasColumn reports whether table has a column named column, via
 // PRAGMA table_info - used to make ALTER TABLE ADD COLUMN migrations
 // idempotent, since SQLite has no ADD COLUMN IF NOT EXISTS.
+//
+// table is concatenated directly into the query rather than passed as a
+// parameter because SQLite's PRAGMA statements don't accept bind
+// parameters at all - this is safe only because every caller passes a
+// hardcoded literal (never user input); it would need revisiting if that
+// ever changed.
 func hasColumn(db *sql.DB, table, column string) (bool, error) {
 	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
@@ -110,8 +116,18 @@ func IsSynced(db *sql.DB, importID string) (bool, error) {
 // for the posted transaction, stored so it can be deleted later if needed;
 // pass "" when it isn't known (e.g. YNAB reported the post as a duplicate,
 // which doesn't disclose the existing transaction's ID).
+//
+// ON CONFLICT makes this idempotent rather than relying on every caller
+// checking IsSynced first (true today, but not an invariant this function
+// itself enforces) - a repeat call for an already-synced importID updates
+// the recorded YNAB transaction ID instead of erroring, which also lets a
+// later call that *does* learn the ID (e.g. after a duplicate-reconciliation
+// post) self-heal a previously empty one.
 func MarkSynced(db *sql.DB, importID, ynabTransactionID string) error {
-	_, err := db.Exec(`INSERT INTO synced_transactions (import_id, ynab_transaction_id) VALUES (?, ?)`, importID, ynabTransactionID)
+	_, err := db.Exec(`
+		INSERT INTO synced_transactions (import_id, ynab_transaction_id) VALUES (?, ?)
+		ON CONFLICT(import_id) DO UPDATE SET ynab_transaction_id = excluded.ynab_transaction_id
+	`, importID, ynabTransactionID)
 	return err
 }
 
