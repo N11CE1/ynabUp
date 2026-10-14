@@ -104,7 +104,8 @@ type transactionRequest struct {
 type postTransactionResponse struct {
 	Data struct {
 		Transaction struct {
-			ID string `json:"id"`
+			ID                    string `json:"id"`
+			TransferTransactionID string `json:"transfer_transaction_id"`
 		} `json:"transaction"`
 	} `json:"data"`
 }
@@ -258,50 +259,58 @@ func Transform(txn up.Transaction, accountID string) Transaction {
 	}
 }
 
+type PostedTransaction struct {
+	ID                    string
+	TransferTransactionID string
+}
+
 // PostTransaction sends a single transformed transaction to YNAB's API,
 // retrying with exponential backoff if rate-limited, and returns YNAB's own
-// ID for the created transaction (needed later to delete it, since YNAB's
-// delete endpoint is keyed by its ID, not import_id). YNAB doesn't send a
+// ID for the created transaction plus, for linked transfers, the ID of the
+// automatically-created transaction on the other side. YNAB doesn't send a
 // Retry-After header, so this only smooths over short bursts - if the
 // hourly quota is genuinely exhausted, it gives up and returns an error;
 // callers can safely retry later since posting is idempotent on import_id.
-// On ErrDuplicateTransaction the returned ID is empty, since YNAB's 409
-// response doesn't disclose the existing transaction's ID.
-func PostTransaction(txn Transaction, budgetID, token string) (ynabTransactionID string, err error) {
+// On ErrDuplicateTransaction the returned IDs are empty, since YNAB's 409
+// response doesn't disclose the existing transaction's IDs.
+func PostTransaction(txn Transaction, budgetID, token string) (posted PostedTransaction, err error) {
 	body, err := json.Marshal(transactionRequest{Transaction: txn})
 	if err != nil {
-		return "", err
+		return PostedTransaction{}, err
 	}
 
 	url := fmt.Sprintf("%s/budgets/%s/transactions", APIBaseURL, budgetID)
 	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return PostedTransaction{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := doWithRetry(req)
 	if err != nil {
-		return "", err
+		return PostedTransaction{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusConflict {
-		return "", ErrDuplicateTransaction
+		return PostedTransaction{}, ErrDuplicateTransaction
 	}
 
 	if resp.StatusCode != http.StatusCreated {
 		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("unexpected status: %s: %s", resp.Status, respBody)
+		return PostedTransaction{}, fmt.Errorf("unexpected status: %s: %s", resp.Status, respBody)
 	}
 
 	var result postTransactionResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("decoding created transaction: %w", err)
+		return PostedTransaction{}, fmt.Errorf("decoding created transaction: %w", err)
 	}
 
-	return result.Data.Transaction.ID, nil
+	return PostedTransaction{
+		ID:                    result.Data.Transaction.ID,
+		TransferTransactionID: result.Data.Transaction.TransferTransactionID,
+	}, nil
 }
 
 type clearedUpdateRequest struct {

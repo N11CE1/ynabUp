@@ -46,10 +46,15 @@ type fakeYNAB struct {
 }
 
 // fakeTransactionID deterministically derives a YNAB transaction ID from an
-// import_id, so tests can assert DeleteTransaction was called with the
-// right ID without needing to inspect fakeYNAB's internal state.
+// import_id, so tests can assert YNAB update/delete calls were made against
+// the expected transaction without needing to inspect fakeYNAB's internal
+// state.
 func fakeTransactionID(importID string) string {
 	return "ynab-" + importID
+}
+
+func fakeLinkedTransactionID(importID string) string {
+	return "ynab-linked-" + importID
 }
 
 func newFakeYNAB(t *testing.T) *fakeYNAB {
@@ -89,10 +94,14 @@ func (f *fakeYNAB) handle(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		transaction := map[string]any{"id": fakeTransactionID(importID)}
+		if payeeID, _ := txn["payee_id"].(string); payeeID != "" {
+			transaction["transfer_transaction_id"] = fakeLinkedTransactionID(importID)
+		}
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]any{
 			"data": map[string]any{
-				"transaction": map[string]any{"id": fakeTransactionID(importID)},
+				"transaction": transaction,
 			},
 		})
 
@@ -237,7 +246,7 @@ func TestSyncTransaction_AlreadySyncedSkipsWithoutPosting(t *testing.T) {
 	db := testDB(t)
 	f := newFakeYNAB(t)
 
-	if err := store.MarkSynced(db, "txn-1", "ynab-txn-1"); err != nil {
+	if err := store.MarkSynced(db, "txn-1", "ynab-txn-1", ""); err != nil {
 		t.Fatalf("MarkSynced: %v", err)
 	}
 
@@ -258,7 +267,7 @@ func TestSyncTransaction_AlreadySyncedButNowClearedUpdatesYNAB(t *testing.T) {
 	db := testDB(t)
 	f := newFakeYNAB(t)
 
-	if err := store.MarkSynced(db, "txn-1", "ynab-txn-1"); err != nil {
+	if err := store.MarkSynced(db, "txn-1", "ynab-txn-1", ""); err != nil {
 		t.Fatalf("MarkSynced: %v", err)
 	}
 
@@ -282,13 +291,45 @@ func TestSyncTransaction_AlreadySyncedButNowClearedUpdatesYNAB(t *testing.T) {
 	}
 }
 
+func TestSyncTransaction_AlreadySyncedButNowClearedUpdatesBothSidesOfLinkedTransfer(t *testing.T) {
+	db := testDB(t)
+	f := newFakeYNAB(t)
+
+	if err := store.MarkSynced(db, "txn-1", "ynab-txn-1", "ynab-linked-txn-1"); err != nil {
+		t.Fatalf("MarkSynced: %v", err)
+	}
+
+	txn := ynab.Transaction{AccountID: "acct1", ImportID: "txn-1", Cleared: "cleared"}
+	skipped, err := SyncTransaction(db, txn, baseCfg())
+	if err != nil {
+		t.Fatalf("SyncTransaction: %v", err)
+	}
+	if !skipped {
+		t.Fatal("expected skipped=true for an already-synced transaction")
+	}
+
+	paths := f.patchedTransactionPaths()
+	if len(paths) != 2 {
+		t.Fatalf("expected exactly two PATCHes for the linked transfer sides, got %v", paths)
+	}
+	want := map[string]bool{
+		"/budgets/budget1/transactions/ynab-txn-1":        true,
+		"/budgets/budget1/transactions/ynab-linked-txn-1": true,
+	}
+	for _, path := range paths {
+		if !want[path] {
+			t.Fatalf("unexpected PATCH path %s (all paths: %v)", path, paths)
+		}
+	}
+}
+
 func TestSyncTransaction_AlreadySyncedWithNoKnownYNABIDSkipsClearedUpdate(t *testing.T) {
 	db := testDB(t)
 	f := newFakeYNAB(t)
 
 	// Simulates a transaction synced via the duplicate-reconciliation path,
 	// which never learns YNAB's own ID for the existing transaction.
-	if err := store.MarkSynced(db, "txn-1", ""); err != nil {
+	if err := store.MarkSynced(db, "txn-1", "", ""); err != nil {
 		t.Fatalf("MarkSynced: %v", err)
 	}
 
@@ -467,6 +508,28 @@ func TestSyncUpTransaction_RealTransferInflowSuppressed(t *testing.T) {
 	}
 }
 
+func TestSyncUpTransaction_RealTransferOutflowStoresBothYnabTransferIDs(t *testing.T) {
+	db := testDB(t)
+	f := newFakeYNAB(t)
+
+	txn := upTxn("txn-transfer", "up-spending", -2000, "Transfer", "up-saver")
+	if _, err := SyncUpTransaction(db, txn, transferCfg()); err != nil {
+		t.Fatalf("SyncUpTransaction: %v", err)
+	}
+	if f.postCount() != 1 {
+		t.Fatalf("expected 1 POST for the linked transfer, got %d", f.postCount())
+	}
+
+	ids, err := store.YnabTransactionIDs(db, ynab.SafeImportID("txn-transfer"))
+	if err != nil {
+		t.Fatalf("YnabTransactionIDs: %v", err)
+	}
+	want := []string{fakeTransactionID("txn-transfer"), fakeLinkedTransactionID("txn-transfer")}
+	if len(ids) != len(want) || ids[0] != want[0] || ids[1] != want[1] {
+		t.Fatalf("expected both linked YNAB ids to be recorded, got %v want %v", ids, want)
+	}
+}
+
 // TestSyncUpTransaction_RoundUpConstructsSyntheticOutflow guards against the
 // exact regression documented in HLSD.md: a Round Up-style one-sided inflow
 // (transferAccount set, transactionType != "Transfer") must not be posted as
@@ -578,6 +641,38 @@ func TestDeleteSyncedUpTransaction_RetractsFromYNAB(t *testing.T) {
 	}
 }
 
+func TestDeleteSyncedUpTransaction_DeletesBothSidesOfLinkedTransfer(t *testing.T) {
+	db := testDB(t)
+	f := newFakeYNAB(t)
+
+	importID := ynab.SafeImportID("up-transfer-1")
+	if err := store.MarkSynced(db, importID, "ynab-outflow-1", "ynab-inflow-1"); err != nil {
+		t.Fatalf("MarkSynced: %v", err)
+	}
+
+	deleted, hadRecord, err := DeleteSyncedUpTransaction(db, "up-transfer-1", baseCfg())
+	if err != nil {
+		t.Fatalf("DeleteSyncedUpTransaction: %v", err)
+	}
+	if !deleted || !hadRecord {
+		t.Fatalf("expected deleted=true, hadRecord=true, got deleted=%v hadRecord=%v", deleted, hadRecord)
+	}
+
+	paths := f.deletedTransactionPaths()
+	if len(paths) != 2 {
+		t.Fatalf("expected two DELETEs for the linked transfer sides, got %v", paths)
+	}
+	want := map[string]bool{
+		"/budgets/budget1/transactions/ynab-outflow-1": true,
+		"/budgets/budget1/transactions/ynab-inflow-1":  true,
+	}
+	for _, path := range paths {
+		if !want[path] {
+			t.Fatalf("unexpected DELETE path %s (all paths: %v)", path, paths)
+		}
+	}
+}
+
 func TestDeleteSyncedUpTransaction_NeverSyncedIsNoOp(t *testing.T) {
 	db := testDB(t)
 	f := newFakeYNAB(t)
@@ -604,7 +699,7 @@ func TestDeleteSyncedUpTransaction_NoKnownYnabIDLeavesRecord(t *testing.T) {
 	f := newFakeYNAB(t)
 
 	importID := ynab.SafeImportID("up-txn-legacy")
-	if err := store.MarkSynced(db, importID, ""); err != nil {
+	if err := store.MarkSynced(db, importID, "", ""); err != nil {
 		t.Fatalf("MarkSynced: %v", err)
 	}
 

@@ -30,7 +30,7 @@ func TestIsSynced_FalseForUnknownImportID(t *testing.T) {
 func TestMarkSynced_ThenIsSyncedReturnsTrue(t *testing.T) {
 	db := testDB(t)
 
-	if err := MarkSynced(db, "txn-1", "ynab-1"); err != nil {
+	if err := MarkSynced(db, "txn-1", "ynab-1", ""); err != nil {
 		t.Fatalf("MarkSynced: %v", err)
 	}
 
@@ -46,13 +46,13 @@ func TestMarkSynced_ThenIsSyncedReturnsTrue(t *testing.T) {
 func TestMarkSynced_IsIdempotentAndUpdatesYnabTransactionID(t *testing.T) {
 	db := testDB(t)
 
-	if err := MarkSynced(db, "txn-1", ""); err != nil {
+	if err := MarkSynced(db, "txn-1", "", ""); err != nil {
 		t.Fatalf("MarkSynced (first, no id known): %v", err)
 	}
 
 	// A later call learning the YNAB id shouldn't error just because the
 	// import_id is already recorded, and should overwrite the empty id.
-	if err := MarkSynced(db, "txn-1", "ynab-1"); err != nil {
+	if err := MarkSynced(db, "txn-1", "ynab-1", ""); err != nil {
 		t.Fatalf("MarkSynced (second, id now known): %v", err)
 	}
 
@@ -62,6 +62,22 @@ func TestMarkSynced_IsIdempotentAndUpdatesYnabTransactionID(t *testing.T) {
 	}
 	if !has || id != "ynab-1" {
 		t.Fatalf("expected the second MarkSynced call to update the recorded id, got %q (has=%v)", id, has)
+	}
+}
+
+func TestMarkSynced_LinkedTransferStoresBothYnabIDs(t *testing.T) {
+	db := testDB(t)
+
+	if err := MarkSynced(db, "txn-transfer", "ynab-outflow", "ynab-inflow"); err != nil {
+		t.Fatalf("MarkSynced: %v", err)
+	}
+
+	ids, err := YnabTransactionIDs(db, "txn-transfer")
+	if err != nil {
+		t.Fatalf("YnabTransactionIDs: %v", err)
+	}
+	if len(ids) != 2 || ids[0] != "ynab-outflow" || ids[1] != "ynab-inflow" {
+		t.Fatalf("expected both stored YNAB ids, got %v", ids)
 	}
 }
 
@@ -82,7 +98,7 @@ func TestYnabTransactionID_RecordedButEmptyReportsNotHas(t *testing.T) {
 
 	// Simulates the duplicate-reconciliation path, which records synced
 	// state without ever learning YNAB's own transaction id.
-	if err := MarkSynced(db, "txn-1", ""); err != nil {
+	if err := MarkSynced(db, "txn-1", "", ""); err != nil {
 		t.Fatalf("MarkSynced: %v", err)
 	}
 
@@ -98,7 +114,7 @@ func TestYnabTransactionID_RecordedButEmptyReportsNotHas(t *testing.T) {
 func TestDeleteSynced_RemovesRecordAndIsSyncedReturnsFalse(t *testing.T) {
 	db := testDB(t)
 
-	if err := MarkSynced(db, "txn-1", "ynab-1"); err != nil {
+	if err := MarkSynced(db, "txn-1", "ynab-1", ""); err != nil {
 		t.Fatalf("MarkSynced: %v", err)
 	}
 	if err := DeleteSynced(db, "txn-1"); err != nil {

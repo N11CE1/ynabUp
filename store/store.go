@@ -24,19 +24,29 @@ func Open(path string) (*sql.DB, error) {
 		return nil, err
 	}
 
-	// ynab_transaction_id records YNAB's own ID for the posted transaction
-	// (distinct from import_id), needed to delete it later if Up reports the
-	// source transaction as deleted. Added after synced_transactions already
-	// existed in production, so it's a migration rather than part of the
-	// original CREATE TABLE. SQLite's ALTER TABLE has no ADD COLUMN IF NOT
-	// EXISTS (unlike CREATE TABLE), so the column has to be checked for via
-	// PRAGMA table_info first to make this safe to run on every startup.
-	hasColumn, err := hasColumn(db, "synced_transactions", "ynab_transaction_id")
+	// YNAB IDs are stored alongside import_id so later webhook events can
+	// update or delete the exact transaction(s) already posted. Linked
+	// transfers have two YNAB transaction IDs - one for each side - so both
+	// columns are migrated in after the original table creation. SQLite's
+	// ALTER TABLE has no ADD COLUMN IF NOT EXISTS (unlike CREATE TABLE), so
+	// each column has to be checked for via PRAGMA table_info first to make
+	// this safe to run on every startup.
+	hasYnabTransactionIDColumn, err := hasColumn(db, "synced_transactions", "ynab_transaction_id")
 	if err != nil {
 		return nil, err
 	}
-	if !hasColumn {
+	if !hasYnabTransactionIDColumn {
 		if _, err := db.Exec(`ALTER TABLE synced_transactions ADD COLUMN ynab_transaction_id TEXT`); err != nil {
+			return nil, err
+		}
+	}
+
+	hasLinkedTransferTransactionIDColumn, err := hasColumn(db, "synced_transactions", "linked_transfer_transaction_id")
+	if err != nil {
+		return nil, err
+	}
+	if !hasLinkedTransferTransactionIDColumn {
+		if _, err := db.Exec(`ALTER TABLE synced_transactions ADD COLUMN linked_transfer_transaction_id TEXT`); err != nil {
 			return nil, err
 		}
 	}
@@ -113,38 +123,63 @@ func IsSynced(db *sql.DB, importID string) (bool, error) {
 }
 
 // MarkSynced records importID as synced. ynabTransactionID is YNAB's own ID
-// for the posted transaction, stored so it can be deleted later if needed;
-// pass "" when it isn't known (e.g. YNAB reported the post as a duplicate,
-// which doesn't disclose the existing transaction's ID).
+// for the posted transaction, stored so it can be updated or deleted later
+// if needed. linkedTransferTransactionID is the automatically-created other
+// side of a linked transfer, if any. Pass "" for either ID when it isn't
+// known (e.g. YNAB reported the post as a duplicate, which doesn't disclose
+// the existing transaction's ID).
 //
 // ON CONFLICT makes this idempotent rather than relying on every caller
 // checking IsSynced first (true today, but not an invariant this function
 // itself enforces) - a repeat call for an already-synced importID updates
-// the recorded YNAB transaction ID instead of erroring, which also lets a
-// later call that *does* learn the ID (e.g. after a duplicate-reconciliation
-// post) self-heal a previously empty one.
-func MarkSynced(db *sql.DB, importID, ynabTransactionID string) error {
+// the recorded YNAB transaction IDs instead of erroring, which also lets a
+// later call that *does* learn the IDs self-heal a previously empty record.
+func MarkSynced(db *sql.DB, importID, ynabTransactionID, linkedTransferTransactionID string) error {
 	_, err := db.Exec(`
-		INSERT INTO synced_transactions (import_id, ynab_transaction_id) VALUES (?, ?)
-		ON CONFLICT(import_id) DO UPDATE SET ynab_transaction_id = excluded.ynab_transaction_id
-	`, importID, ynabTransactionID)
+		INSERT INTO synced_transactions (import_id, ynab_transaction_id, linked_transfer_transaction_id) VALUES (?, ?, ?)
+		ON CONFLICT(import_id) DO UPDATE SET
+			ynab_transaction_id = excluded.ynab_transaction_id,
+			linked_transfer_transaction_id = excluded.linked_transfer_transaction_id
+	`, importID, ynabTransactionID, linkedTransferTransactionID)
 	return err
 }
 
-// YnabTransactionID returns the YNAB transaction ID recorded for importID,
-// and whether one was found and non-empty (it may be recorded-but-empty for
-// transactions synced via the duplicate-reconciliation path, which never
-// learns YNAB's ID for the existing transaction).
-func YnabTransactionID(db *sql.DB, importID string) (string, bool, error) {
-	var id sql.NullString
-	err := db.QueryRow(`SELECT ynab_transaction_id FROM synced_transactions WHERE import_id = ?`, importID).Scan(&id)
+// YnabTransactionIDs returns every non-empty YNAB transaction ID recorded for
+// importID. Most transactions only have one; linked transfers have two, one
+// per side. Transactions synced via the duplicate-reconciliation path may
+// have a sync record but no known YNAB IDs at all.
+func YnabTransactionIDs(db *sql.DB, importID string) ([]string, error) {
+	var primaryID, linkedID sql.NullString
+	err := db.QueryRow(`SELECT ynab_transaction_id, linked_transfer_transaction_id FROM synced_transactions WHERE import_id = ?`, importID).Scan(&primaryID, &linkedID)
 	if err == sql.ErrNoRows {
-		return "", false, nil
+		return nil, nil
 	}
+	if err != nil {
+		return nil, err
+	}
+
+	var ids []string
+	if primaryID.Valid && primaryID.String != "" {
+		ids = append(ids, primaryID.String)
+	}
+	if linkedID.Valid && linkedID.String != "" && linkedID.String != primaryID.String {
+		ids = append(ids, linkedID.String)
+	}
+	return ids, nil
+}
+
+// YnabTransactionID returns the primary YNAB transaction ID recorded for
+// importID, and whether one was found and non-empty. Kept for callers and
+// tests that only care about the directly-posted side of a transaction.
+func YnabTransactionID(db *sql.DB, importID string) (string, bool, error) {
+	ids, err := YnabTransactionIDs(db, importID)
 	if err != nil {
 		return "", false, err
 	}
-	return id.String, id.Valid && id.String != "", nil
+	if len(ids) == 0 {
+		return "", false, nil
+	}
+	return ids[0], true, nil
 }
 
 // DeleteSynced removes importID's sync record, e.g. after retracting the
