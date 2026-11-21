@@ -2,3 +2,5 @@
 ynabUp.git
 sync.db
 sync_real.db
+.tmp-gocache/
+.tmp-gotmp/
