@@ -190,7 +190,9 @@ Check:
 Run a one-shot sync in the container image locally from the repo:
 
 ```sh
-docker compose run --rm ynabup
+# Locally: use separate test credentials in .env.
+# Production: run on the VPS with the normal service stopped; restart it afterward.
+docker compose run --rm ynabup -serve=false
 ```
 
 Rebuild only:
