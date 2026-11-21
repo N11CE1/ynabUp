@@ -131,6 +131,8 @@ Notes:
 - sync state lives in the named volume `ynabup-data`
 - the app listens on `127.0.0.1:8080` in Compose and expects TLS termination / public exposure to happen at a reverse proxy
 - the container defaults to `-serve`
+- the runtime image includes a Docker `HEALTHCHECK` against `/healthz`
+- the runtime container runs as an unprivileged user rather than root
 
 ## Checking health
 
