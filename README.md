@@ -1,4 +1,7 @@
 # ynabUp
+
+[![CI](https://github.com/N11CE1/ynabUp/actions/workflows/ci.yml/badge.svg)](https://github.com/N11CE1/ynabUp/actions/workflows/ci.yml)
+
 An Up Bank → YNAB transaction sync service, written in Go.
 
 ![Architecture diagram](ynabUpDesign.svg)
