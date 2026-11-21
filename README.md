@@ -6,7 +6,7 @@
 
 ![Architecture diagram](ynabUpDesign.svg)
 
-See [HLSD.md](HLSD.md) for the architecture and design reasoning, and [TODO.md](TODO.md) for the current backlog.
+See [HLSD.md](HLSD.md) for the architecture and design reasoning, [CHANGELOG.md](CHANGELOG.md) for notable changes over time, and [TODO.md](TODO.md) for the current backlog.
 
 ## What it does
 
