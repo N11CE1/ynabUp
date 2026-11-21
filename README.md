@@ -103,6 +103,7 @@ A small `Makefile` is included for common local workflows:
 make fmt
 make vet
 make test
+make test-race
 make ci
 make run
 make serve

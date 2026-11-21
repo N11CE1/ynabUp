@@ -35,5 +35,8 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Race test
+        run: go test -race ./...
+
       - name: Build Docker image
         run: docker build -t ynabup:ci .
