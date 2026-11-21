@@ -7,6 +7,9 @@ vet:
 test:
 	go test ./...
 
+test-race:
+	go test -race ./...
+
 ci:
 	files=$$(gofmt -l .); \
 	if [ -n "$$files" ]; then \
@@ -16,6 +19,7 @@ ci:
 	fi
 	go vet ./...
 	go test ./...
+	go test -race ./...
 	docker build -t ynabup:local .
 
 run:
