@@ -95,6 +95,20 @@ curl -X POST https://api.up.com.au/api/v1/webhooks \
 
 The response includes a `secretKey` — that's `UP_WEBHOOK_SECRET`.
 
+## Common development commands
+
+A small `Makefile` is included for common local workflows:
+
+```sh
+make fmt
+make vet
+make test
+make ci
+make run
+make serve
+make docker-build
+```
+
 ## Testing
 
 ```sh
