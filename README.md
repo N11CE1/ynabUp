@@ -11,9 +11,9 @@ See [HLSD.md](HLSD.md) for the architecture and design reasoning, and
 
 ## Configuration
 
-Copy the variables below into a `.env` file in the project root (or set
-them in the environment directly — `.env` is optional, loaded via
-[godotenv](https://github.com/joho/godotenv) if present).
+Copy `.env.example` to `.env` in the project root and fill in the values
+below (or set them in the environment directly — `.env` is optional,
+loaded via [godotenv](https://github.com/joho/godotenv) if present).
 
 | Variable | Required | Description |
 |---|---|---|
