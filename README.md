@@ -173,3 +173,7 @@ Check that:
 - the webhook URL points at your deployed `/webhooks/up` endpoint
 - `UP_WEBHOOK_SECRET` matches the `secretKey` returned by Up
 - the reverse proxy is forwarding requests to the container on port `8080`
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
