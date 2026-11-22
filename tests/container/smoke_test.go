@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"math/big"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -146,12 +147,28 @@ func TestContainerRuntime(t *testing.T) {
 		}
 	})
 
+	// Seed real sync state before simulating a root-run deployment. Use a
+	// historical watermark so a reset to the current time cannot pass.
+	const watermark = "2026-01-15T12:34:56Z"
+	const record = "legacy-transfer|ynab-outflow|ynab-inflow"
+	docker(t, "run", "--rm", "--network", "none", "--mount", "type=volume,src="+id+",dst=/data",
+		"--entrypoint", "sqlite3", fixtureImage, "/data/sync.db",
+		`INSERT INTO synced_transactions (import_id, ynab_transaction_id, linked_transfer_transaction_id)
+		 VALUES ('legacy-transfer', 'ynab-outflow', 'ynab-inflow');
+		 UPDATE settings SET value = '`+watermark+`' WHERE key = 'up_last_synced_at';`)
+	if got := docker(t, "run", "--rm", "--network", "none", "--mount", "type=volume,src="+id+",dst=/data,readonly",
+		"--entrypoint", "sqlite3", fixtureImage, "-readonly", "/data/sync.db",
+		`SELECT value FROM settings WHERE key = 'up_last_synced_at';`); got != watermark {
+		t.Fatalf("failed to seed exact watermark: got %q, want %q", got, watermark)
+	}
+
 	// Simulate the previous root-run deployment using the valid SQLite DB
 	// created above, not an empty placeholder file. Keep restrictive modes.
 	docker(t, "run", "--rm", "--network", "none", "--mount", "type=volume,src="+id+",dst=/data",
 		"--entrypoint", "/bin/sh", image, "-ec",
 		"test -s /data/sync.db; echo preserved > /data/marker; chown -R root:root /data; chmod 700 /data; chmod 600 /data/sync.db")
 
+	beforeRestart := docker(t, "logs", fixture)
 	t.Run("server repairs legacy volume and runs unprivileged", func(t *testing.T) {
 		name := id + "-server"
 		createApp(t, name) // Exercise the image's default CMD, without passing -serve.
@@ -193,10 +210,46 @@ func TestContainerRuntime(t *testing.T) {
 		if strings.Contains(logs, "failed to") || strings.Contains(logs, "reconciliation failed") {
 			t.Fatalf("expected successful startup reconciliation:\n%s", logs)
 		}
+		// Read the actual transaction row with the application's effective UID,
+		// not root, after ownership repair and startup reconciliation.
+		got := docker(t, "run", "--rm", "--network", "none", "--user", fields[2],
+			"--mount", "type=volume,src="+id+",dst=/data,readonly",
+			"--entrypoint", "sqlite3", fixtureImage, "-readonly", "/data/sync.db",
+			`SELECT import_id, ynab_transaction_id, linked_transfer_transaction_id
+			 FROM synced_transactions WHERE import_id = 'legacy-transfer';`)
+		if got != record {
+			t.Fatalf("legacy transaction and both YNAB IDs must survive restart: got %q, want %q", got, record)
+		}
 	})
 	fixtureLogs := docker(t, "logs", fixture)
-	if !strings.Contains(fixtureLogs, "api.up.com.au /api/v1/transactions?filter") {
-		t.Fatalf("expected persisted watermark to survive the legacy-volume restart:\n%s", fixtureLogs)
+	if !strings.HasPrefix(fixtureLogs, beforeRestart) {
+		t.Fatalf("fixture log history changed unexpectedly:\n%s", fixtureLogs)
+	}
+	requests := 0
+	for _, line := range strings.Split(strings.TrimPrefix(fixtureLogs, beforeRestart), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 5 || fields[2] != "GET" || fields[3] != "api.up.com.au" {
+			continue
+		}
+		requestURL, err := url.ParseRequestURI(fields[4])
+		if err != nil {
+			t.Fatalf("invalid Up request URI in fixture logs: %v", err)
+		}
+		if requestURL.Path != "/api/v1/transactions" {
+			continue
+		}
+		requests++
+		values, err := url.ParseQuery(requestURL.RawQuery)
+		if err != nil {
+			t.Fatalf("invalid Up request query: %v", err)
+		}
+		since := values["filter[since]"]
+		if len(since) != 1 || since[0] != watermark {
+			t.Fatalf("restart must fetch from the exact persisted watermark: got %v, want [%s]", since, watermark)
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("expected exactly one Up transaction request after restart, got %d:\n%s", requests, fixtureLogs)
 	}
 }
 
