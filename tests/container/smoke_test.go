@@ -204,7 +204,12 @@ func TestContainerRuntime(t *testing.T) {
 				Status       string `json:"status"`
 				LastSyncedAt string `json:"last_synced_at"`
 			}
-			return json.Unmarshal([]byte(body), &health) == nil && health.Status == "ok" && health.LastSyncedAt != "" && strings.Contains(docker(t, "logs", name), "Done: 0 synced, 0 already synced (skipped), 0 failed")
+			if json.Unmarshal([]byte(body), &health) != nil || health.Status != "ok" {
+				return false
+			}
+			lastSyncedAt, err := time.Parse(time.RFC3339, health.LastSyncedAt)
+			seededAt, seedErr := time.Parse(time.RFC3339, watermark)
+			return err == nil && seedErr == nil && lastSyncedAt.After(seededAt) && strings.Contains(docker(t, "logs", name), "Done: 0 synced, 0 already synced (skipped), 0 failed")
 		})
 		logs := docker(t, "logs", name)
 		if strings.Contains(logs, "failed to") || strings.Contains(logs, "reconciliation failed") {
