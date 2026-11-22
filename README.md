@@ -6,7 +6,7 @@
 
 ![Architecture diagram](ynabUpDesign.svg)
 
-See [HLSD.md](HLSD.md) for the architecture and design reasoning, [CHANGELOG.md](CHANGELOG.md) for notable changes over time, [docs/deployment.md](docs/deployment.md) for VPS deployment/operations guidance, and [TODO.md](TODO.md) for the current backlog.
+See [HLSD.md](HLSD.md) for the architecture and design reasoning, [CHANGELOG.md](CHANGELOG.md) for notable changes over time, [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow expectations, [docs/deployment.md](docs/deployment.md) for VPS deployment/operations guidance, and [TODO.md](TODO.md) for the current backlog.
 
 ## What it does
 
