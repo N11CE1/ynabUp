@@ -6,6 +6,9 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## [Unreleased]
 
+### Added
+- Isolated container smoke tests for one-shot mode, non-root execution, health checks, and legacy root-owned SQLite volumes, available through `make test-container` and CI
+
 ## 0.1.0 - 2026-11-22
 
 First versioned release, establishing a baseline for the existing application.

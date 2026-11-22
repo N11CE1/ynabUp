@@ -104,6 +104,7 @@ make fmt
 make vet
 make test
 make test-race
+make test-container
 make ci
 make run
 make serve
@@ -115,6 +116,21 @@ make docker-build
 ```sh
 go test ./...
 ```
+
+With Docker running, exercise the actual container startup and health check:
+
+```sh
+make test-container
+```
+
+These opt-in smoke tests build the app and a small HTTPS API fixture, use fake
+credentials on an internal-only Docker network, and create disposable SQLite
+storage. They do not load your `.env`, publish host ports, or use production APIs.
+They verify one-shot exit, non-root application execution, Docker health status,
+and startup with a root-owned database from an earlier deployment. Resources are
+removed after the tests (Docker's build cache is retained). Initial builds need
+network access to download base images and Go modules. `make ci` includes these
+tests; ordinary `make test` does not require Docker.
 
 ## Deploying with Docker Compose
 
