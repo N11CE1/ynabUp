@@ -6,10 +6,32 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 
 ## [Unreleased]
 
-### Added
-- `CHANGELOG.md`
+## 0.1.0 - 2026-11-22
 
-## [Pre-release]
+First versioned release, establishing a baseline for the existing application.
+
+### Added
+- Up Bank to YNAB syncing through one-shot runs, signed Up webhooks, and periodic reconciliation
+- SQLite sync-state tracking and a persisted reconciliation watermark
+- Linked transfers between mapped Up accounts, including synthetic outflows for one-sided Round Up transfers
+- Optional savings-category funding when linked transfers land in configured savings accounts
+- Handling for source transaction deletions and cleared-status updates
+- Docker Compose deployment with persistent state, a container health check, and privilege-dropping startup
+- GitHub Actions checks for formatting, vet, tests, race detection, and Docker builds
+- Configuration template, Makefile, dependency updates through Dependabot, and MIT licensing
+- Architecture documentation, deployment runbook, contributor guide, and changelog
+- Manual release checklist and versioning conventions in `docs/releases.md`
+
+### Known limitations
+- A first sync without a stored watermark fetches Up transaction history; review the target budget before using an existing production budget
+- Older sync records without known YNAB transaction IDs cannot automatically update or delete those transactions
+- Existing linked-transfer records without the mirror transaction ID cannot automatically clear both sides from local state alone
+- Only one syncing instance should run against the production budget at a time
+
+## Historical milestones (before versioned releases)
+
+The entries below summarize the project's Git history before `v0.1.0`.
+They are not separate releases or tags.
 
 ### Added
 - initial Up Bank transaction fetcher and MVP one-shot sync into YNAB

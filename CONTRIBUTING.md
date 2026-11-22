@@ -97,7 +97,15 @@ Most likely files to update are:
 
 ## Changelog
 
-Add notable user-visible or maintenance-relevant changes to `CHANGELOG.md`.
+Add notable user-visible or maintenance-relevant changes to the `Unreleased`
+section of `CHANGELOG.md`.
+
+## Releases
+
+Follow [the release checklist](docs/releases.md) when preparing a version.
+Release preparation goes through a PR; the tag is created on the verified merged
+commit afterward. Publishing a GitHub Release and deploying to the VPS are
+separate steps.
 
 ## Style
 
