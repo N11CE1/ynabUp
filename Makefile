@@ -1,3 +1,5 @@
+.PHONY: fmt vet test test-race test-container ci run serve docker-build
+
 fmt:
 	gofmt -w .
 
@@ -10,6 +12,9 @@ test:
 test-race:
 	go test -race ./...
 
+test-container:
+	go test -tags=container_smoke -count=1 -v -timeout=8m ./tests/container
+
 ci:
 	files=$$(gofmt -l .); \
 	if [ -n "$$files" ]; then \
@@ -20,7 +25,7 @@ ci:
 	go vet ./...
 	go test ./...
 	go test -race ./...
-	docker build -t ynabup:local .
+	$(MAKE) test-container
 
 run:
 	go run .
